@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,10 @@ def main():
         if command == "eval":
             sub.add_argument("--checkpoint", type=Path, required=True)
             sub.add_argument("--seed", type=int, default=0, help="Official RoboTwin evaluation seed")
+            sub.add_argument("--ckpt-setting", default="leap",
+                             help="Label used in the official eval_result/ path")
+            sub.add_argument("--intervention", type=json.loads, default=None,
+                             help="JSON prior intervention, e.g. '{\"sigma_scale\": 0}'")
     convert = commands.add_parser("convert")
     convert.add_argument("--input", type=Path, required=True, help="Directory containing episode*.hdf5")
     convert.add_argument("--output", type=Path, required=True)
@@ -76,10 +81,13 @@ def main():
     else:
         if not args.checkpoint.is_file():
             raise FileNotFoundError(args.checkpoint)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.ckpt_setting):
+            parser.error("--ckpt-setting must match [A-Za-z0-9_-]+ (it names an eval_result/ directory)")
         deploy = {"policy_name": "leap.robotwin.deploy", "task_name": args.task,
-                  "task_config": args.task_config, "ckpt_setting": "leap",
+                  "task_config": args.task_config, "ckpt_setting": args.ckpt_setting,
                   "ckpt_path": str(args.checkpoint.resolve()), "seed": args.seed,
-                  "instruction_type": "unseen", "device": "cuda:0"}
+                  "instruction_type": "unseen", "device": "cuda:0",
+                  "intervention": args.intervention}
         with tempfile.TemporaryDirectory(prefix="leap-eval-") as directory:
             config_path = Path(directory) / "deploy.yml"
             config_path.write_text(yaml.safe_dump(deploy))

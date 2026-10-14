@@ -30,7 +30,10 @@ class Model:
 
 
 def get_model(usr_args):
-    return Model(load_policy(usr_args["ckpt_path"], device=usr_args.get("device", "cuda:0")))
+    policy = load_policy(usr_args["ckpt_path"], device=usr_args.get("device", "cuda:0"))
+    # Optional inference-time prior intervention (see LeaPPolicy.set_prior_intervention).
+    policy.set_prior_intervention(usr_args.get("intervention"))
+    return Model(policy)
 
 
 def eval(TASK_ENV, model, observation):

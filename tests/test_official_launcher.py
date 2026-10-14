@@ -22,12 +22,16 @@ class OfficialLauncherTest(unittest.TestCase):
                  patch.object(launcher.subprocess, "run") as run, \
                  patch.object(sys, "argv", ["robotwin.py", "eval", "--robotwin", temp,
                                            "--task", "beat_block_hammer", "--gpu", "2",
-                                           "--checkpoint", str(checkpoint), "--seed", "3"]):
+                                           "--checkpoint", str(checkpoint), "--seed", "3",
+                                           "--ckpt-setting", "noprior-s3",
+                                           "--intervention", '{"sigma_scale": 0}']):
                 def inspect(cmd, **kwargs):
                     self.assertEqual(cmd[:3], [sys.executable, "script/eval_policy.py", "--config"])
                     config = yaml.safe_load(Path(cmd[3]).read_text())
                     self.assertEqual(config["policy_name"], "leap.robotwin.deploy")
                     self.assertEqual(config["seed"], 3)
+                    self.assertEqual(config["ckpt_setting"], "noprior-s3")
+                    self.assertEqual(config["intervention"], {"sigma_scale": 0})
                     self.assertNotIn("test_num_override", config)
                     self.assertNotIn("seed_list", config)
                     self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "2")
@@ -35,6 +39,25 @@ class OfficialLauncherTest(unittest.TestCase):
                 run.side_effect = inspect
                 launcher.main()
                 run.assert_called_once()
+
+    def test_default_eval_has_no_intervention_and_rejects_bad_setting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            checkpoint = Path(temp) / "latest.ckpt"
+            checkpoint.touch()
+            base = ["robotwin.py", "eval", "--robotwin", temp, "--task", "t", "--gpu", "0",
+                    "--checkpoint", str(checkpoint)]
+            with patch.object(launcher, "verified_root", return_value=Path(temp)), \
+                 patch.object(launcher.subprocess, "run") as run:
+                def inspect(cmd, **kwargs):
+                    config = yaml.safe_load(Path(cmd[3]).read_text())
+                    self.assertEqual(config["ckpt_setting"], "leap")
+                    self.assertIsNone(config["intervention"])
+                run.side_effect = inspect
+                with patch.object(sys, "argv", base):
+                    launcher.main()
+                with patch.object(sys, "argv", base + ["--ckpt-setting", "../x"]), \
+                     self.assertRaises(SystemExit):
+                    launcher.main()
 
     def test_modified_official_entry_rejected(self):
         import json

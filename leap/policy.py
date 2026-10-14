@@ -58,24 +58,35 @@ class LeaPPrior(nn.Module):
     """
 
     def __init__(self, state_dim, action_dim, n_obs_steps,
-                 encoder_output_dim=128, encoder_hidden_dims=(128, 128)):
+                 encoder_output_dim=128, encoder_hidden_dims=(128, 128),
+                 learnable=True):
         super().__init__()
         self.action_dim = action_dim
         self.n_obs_steps = n_obs_steps
+        self.learnable = learnable
         self.state_encoder = _make_mlp(state_dim, encoder_hidden_dims, encoder_output_dim)
         dist_feature_dim = encoder_output_dim * n_obs_steps
+        # NoPrior baseline keeps the state encoder (flow condition) but has no
+        # distribution head: its source is the standard N(0, I).
         self.head = nn.Sequential(
             nn.LayerNorm(dist_feature_dim),
             nn.Linear(dist_feature_dim, 512),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(512, action_dim * 2),     # -> (mu, log_var)
-        )
+        ) if learnable else None
 
     def forward(self, state):
-        """state: (B, To, state_dim) -> mu, log_var each (B, action_dim)."""
+        """state: (B, To, state_dim) -> mu, log_var each (B, action_dim).
+
+        For the NoPrior baseline mu is zero and log_var is zero (sigma = 1),
+        detached from the graph, so the same sampling code yields N(0, I).
+        """
         B, To = state.shape[:2]
         z_s = self.state_encoder(state.reshape(-1, state.shape[-1])).reshape(B, To, -1)
+        if self.head is None:
+            zeros = torch.zeros((B, self.action_dim), device=state.device, dtype=state.dtype)
+            return zeros, zeros.clone(), z_s
         dist_params = self.head(z_s.reshape(B, -1))
         mu, log_var = dist_params.chunk(2, dim=-1)
         log_var = torch.clamp(log_var, min=-10.0, max=5.0)
@@ -109,8 +120,12 @@ class LeaPPolicy(BasePolicy):
                  flow_net_mlp_ratio: float = 4.0,
                  flow_net_dropout: float = 0.0,
                  flow_net_time_embed_dim: int = 256,
+                 # ---- "leap" (learned source) or "none" (N(0, I) NoPrior baseline) ----
+                 prior_type: str = "leap",
                  **kwargs):
         super().__init__()
+        if prior_type not in ("leap", "none"):
+            raise ValueError(f"prior_type must be 'leap' or 'none', got {prior_type!r}")
 
         action_shape = shape_meta['action']['shape']
         action_dim = action_shape[0] if len(action_shape) == 1 else action_shape[0] * action_shape[1]
@@ -133,11 +148,15 @@ class LeaPPolicy(BasePolicy):
 
         # ---- LeaP learnable source prior (state-only) ----
         self.prior = LeaPPrior(state_dim, action_dim, n_obs_steps,
-                               encoder_output_dim, encoder_hidden_dims)
+                               encoder_output_dim, encoder_hidden_dims,
+                               learnable=prior_type == "leap")
 
-        # ---- alignment projection heads (InfoNCE) ----
-        self.align_action_proj = _make_mlp(horizon * action_dim, encoder_hidden_dims, encoder_output_dim)
-        self.align_obs_proj = _make_mlp(horizon * action_dim, encoder_hidden_dims, encoder_output_dim)
+        # ---- alignment projection heads (InfoNCE); unused by NoPrior ----
+        if prior_type == "leap":
+            self.align_action_proj = _make_mlp(horizon * action_dim, encoder_hidden_dims, encoder_output_dim)
+            self.align_obs_proj = _make_mlp(horizon * action_dim, encoder_hidden_dims, encoder_output_dim)
+        else:
+            self.align_action_proj = self.align_obs_proj = None
 
         # ---- flow velocity net + matcher (operate on flattened H*A chunk) ----
         flow_dim = horizon * action_dim
@@ -162,11 +181,65 @@ class LeaPPolicy(BasePolicy):
         self.nll_loss_weight = nll_loss_weight
         self.align_loss_weight = align_loss_weight
         self.align_temperature = align_temperature
+        self.prior_type = prior_type
+        self.prior_intervention = None
 
-        cprint("[LeaP] learnable source prior (state -> mu/sigma) + linear-OT flow matcher", "green")
-        cprint(f"[LeaP] w_nll={nll_loss_weight}  w_align={align_loss_weight}  tau={align_temperature}  "
-               f"NFE={num_sampling_steps}", "green")
+        if prior_type == "leap":
+            cprint("[LeaP] learnable source prior (state -> mu/sigma) + linear-OT flow matcher", "green")
+            cprint(f"[LeaP] w_nll={nll_loss_weight}  w_align={align_loss_weight}  tau={align_temperature}  "
+                   f"NFE={num_sampling_steps}", "green")
+        else:
+            cprint(f"[LeaP] NoPrior baseline: N(0, I) source + linear-OT flow matcher  NFE={num_sampling_steps}",
+                   "yellow")
         print_params(self)
+
+    # ------------------------------------------------------------------
+    # Inference-time prior intervention (default off; training unaffected)
+    # ------------------------------------------------------------------
+    def set_prior_intervention(self, intervention=None):
+        """Override the learned source at inference. ``None`` restores the default.
+
+        Keys (all optional):
+          sigma_scale     float   multiply sigma (0 -> deterministic source at mu)
+          mu_shift        [A]     add to mu (normalized action units)
+          mu_override     [A]     replace mu
+          logvar_override [A]     replace log sigma^2
+          direct_mu       bool    skip the flow; return mu broadcast over the horizon
+        """
+        if intervention is None:
+            self.prior_intervention = None
+            return
+        if not isinstance(intervention, dict):
+            raise TypeError(f"Prior intervention must be a dict or None, got {type(intervention).__name__}")
+        allowed = {"sigma_scale", "mu_shift", "mu_override", "logvar_override", "direct_mu"}
+        unknown = set(intervention) - allowed
+        if unknown:
+            raise ValueError(f"Unknown prior intervention keys: {sorted(unknown)}")
+        if "sigma_scale" in intervention and float(intervention["sigma_scale"]) < 0:
+            raise ValueError("sigma_scale must be non-negative")
+        self.prior_intervention = dict(intervention)
+
+    def _apply_prior_intervention(self, mu, log_var):
+        cfg = self.prior_intervention
+        if not cfg:
+            return mu, log_var
+
+        def as_vec(value):
+            return torch.as_tensor(value, device=mu.device, dtype=mu.dtype).reshape(1, -1).expand_as(mu)
+
+        if "mu_override" in cfg:
+            mu = as_vec(cfg["mu_override"])
+        if "mu_shift" in cfg:
+            mu = mu + as_vec(cfg["mu_shift"])
+        if "logvar_override" in cfg:
+            log_var = as_vec(cfg["logvar_override"])
+        if "sigma_scale" in cfg:
+            scale = float(cfg["sigma_scale"])
+            if scale == 0:
+                log_var = torch.full_like(log_var, -1e4)   # sigma == 0 exactly in fp32
+            else:
+                log_var = log_var + 2.0 * math.log(scale)
+        return mu, log_var
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -218,6 +291,8 @@ class LeaPPolicy(BasePolicy):
         loss_flow, _ = self.flow_matcher.compute_loss(
             self._flow_velocity, target=nactions.reshape(B, T * A),
             start=x0.reshape(B, T * A), global_cond=z_obs)
+        if self.prior_type == "none":
+            return loss_flow, {"flow_loss": loss_flow.item()}
         loss_nll = self._gaussian_nll(nactions, mu, log_var)
         loss_align = self._contrastive(x0, nactions)
 
@@ -241,10 +316,14 @@ class LeaPPolicy(BasePolicy):
         T, A = self.horizon, self.action_dim
 
         mu, log_var, z_obs = self._encode_obs(nobs)
-        x0 = self.prior.sample(mu, log_var, T)                  # same source distribution as training
-        x = self.flow_matcher.sample(
-            self._flow_velocity, shape=(B, T * A), device=x0.device,
-            num_steps=self.num_sampling_steps, start=x0.reshape(B, T * A), global_cond=z_obs)
+        mu, log_var = self._apply_prior_intervention(mu, log_var)
+        if self.prior_intervention and self.prior_intervention.get("direct_mu"):
+            x = mu.unsqueeze(1).expand(B, T, A).reshape(B, T * A)
+        else:
+            x0 = self.prior.sample(mu, log_var, T)              # same source distribution as training
+            x = self.flow_matcher.sample(
+                self._flow_velocity, shape=(B, T * A), device=x0.device,
+                num_steps=self.num_sampling_steps, start=x0.reshape(B, T * A), global_cond=z_obs)
 
         naction_pred = x.reshape(B, T, A)
         action_pred = self.normalizer['action'].unnormalize(naction_pred)

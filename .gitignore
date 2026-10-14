@@ -13,3 +13,5 @@ wandb/
 third_party/RoboTwin/
 build/
 dist/
+logs/
+.venv/

@@ -60,7 +60,7 @@ open_laptop 86.0 / 46.3; handover_block 91.7 / 38.7.
    write-up can say what the prior actually learned.
 5. **Experiment driver** — `scripts/run_campaign.sh`: sequential collect →
    convert → train (LeaP, NoPrior) → eval per task, idempotent via existing
-   outputs, logs under `outputs/`. Eval results are read from
+   outputs, logs under `logs/`. Eval results are read from
    `ROBOTWIN_ROOT/eval_result/`.
 6. **Report** — `docs/REPRODUCTION.md`: environment, per-task table
    reproduced vs paper, μ/σ statistics, intervention sweep table, deviations,
