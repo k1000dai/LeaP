@@ -1,4 +1,7 @@
-"""Sketch instructions: a circle around the object and an arrow to the target on a camera frame.
+"""Sketch instructions: a circle around the object and an arrow to the target in camera-frame pixel coordinates.
+
+The drawing is placed where the objects appear in the camera frame but, by default, on a white
+canvas of the frame's size rather than on the photo (see ``render_sketch``).
 
 Camera convention (verified on data/raw/beat_block_hammer/leap_clean/data/episode0.hdf5, frame of the
 right-gripper grasp, see tests and the lead report): RoboTwin stores for every frame what SAPIEN's
@@ -85,9 +88,22 @@ def draw_sketch(image, object_px, target_px):
     return image
 
 
-def render_sketch(rgb, intrinsic_cv, extrinsic_cv, object_xyz, target_xyz):
-    """Return a PIL RGB image: ``rgb`` (HxWx3 uint8 or PIL) with the object circled and an arrow to the target."""
-    image = rgb.convert("RGB").copy() if isinstance(rgb, Image.Image) else Image.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB")
+def render_sketch(rgb, intrinsic_cv, extrinsic_cv, object_xyz, target_xyz, background="white"):
+    """Return a PIL RGB image of the camera frame's size with the object circled and an arrow to the target.
+
+    ``background="white"`` (default) draws on a blank canvas in the frame's pixel coordinates;
+    ``background="photo"`` draws on ``rgb`` itself (HxWx3 uint8 or PIL).  Measured on 2026-10-17 with
+    google/embeddinggemma-2 on 100 place_a2b_side episodes: a linear probe of the side from the
+    embedding reaches 49-55 % (chance) when the sketch is drawn on the camera photo, because the
+    photo dominates the embedding, and 89 % on a white canvas (93 % with the arrow alone).
+    """
+    frame = rgb.convert("RGB") if isinstance(rgb, Image.Image) else Image.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB")
+    if background == "photo":
+        image = frame.copy()
+    elif background == "white":
+        image = Image.new("RGB", frame.size, "white")
+    else:
+        raise ValueError(f"background must be 'white' or 'photo', got {background!r}")
     width, height = image.size
     object_px, target_px = sketch_pixels(intrinsic_cv, extrinsic_cv, object_xyz, target_xyz, width, height)
     return draw_sketch(image, object_px, target_px)

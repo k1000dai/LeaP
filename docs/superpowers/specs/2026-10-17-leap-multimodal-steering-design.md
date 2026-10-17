@@ -91,7 +91,7 @@ episodes:
 | file | content |
 |---|---|
 | `episode{i}/text.json` | `{"seen": [...], "unseen": [...]}` from RoboTwin's generator (`instructions/episode{i}.json`); first `TEXT_VARIANTS = 10` seen strings are embedded |
-| `episode{i}/sketch.png` | head-camera frame 0 with a red circle around A and a blue arrow from A to the target spot, both projected with the frame's `intrinsic_cv` / `extrinsic_cv` |
+| `episode{i}/sketch.png` | a red circle around A and a blue arrow from A to the target spot, at the pixel positions projected with head-camera frame 0's `intrinsic_cv` / `extrinsic_cv`, drawn on a **white canvas** of the frame's size (amended 2026-10-17: drawn on the photo itself the side was not linearly separable in the embedding, 49–55 %; on a white canvas 89 %) |
 | `episode{i}/audio_{k}.wav` | `AUDIO_VARIANTS = 3` Piper renderings of seen strings k = 0..2, 16 kHz mono |
 | `embeddings.npz` | `text [E, 10, 768]`, `sketch [E, 1, 768]`, `audio [E, 3, 768]` (float32, L2-normalised), `side [E]` (0 = left, 1 = right), `episode_ends [E]` (must equal the Zarr's) |
 
