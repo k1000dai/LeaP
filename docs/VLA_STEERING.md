@@ -109,6 +109,32 @@ neutral-gauss; neutral-prior (none); neutral-prior × {text, sketch, audio} ×
 
 (pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla`)
 
+## Prior training outcome (reversal labels from the demos)
+
+| | prior-none | prior-concat |
+|---|---|---|
+| best validation NLL (step) | 1.850 (500) | 1.841 (500) |
+| final validation NLL (12.5 k) | 2.42 | 2.41 |
+| final training NLL | 1.33 | 1.33 |
+| N(0, I) reference | 2.494 | |
+| empirical per-element Gaussian | 1.923 | |
+
+31 k frames (28 k train / 3.1 k validation, held-out demos), label std ≈ 1.72,
+reconstruction error of the labels mean 0.275 (median 0.249, p90 0.444). The
+prior beats the global Gaussian only slightly on held-out demos and overfits
+after ~500 steps (the campaign uses `best.pt`); the steering embedding adds
+~0.01 nats. One structural reason: in every demo the target is bowl 1, so
+within a layout the instruction is constant and redundant with the
+observation. The counterfactual extension below addresses this.
+
+## Counterfactual bowl-2 data (phase 3b, in progress)
+
+The frozen VLA is prompted, per layout, with the spatial phrase of bowl 2
+(derived from the BDDL init regions) to produce successful bowl-2 rollouts;
+their predicted chunks are reversed under the neutral prompt, giving noise
+labels where the instruction, not the layout, decides the bowl. The prior is
+then trained on both bowls and evaluated with instructions for either bowl.
+
 ## Notes
 
 - LeRobot's LIBERO env default render is 360²; we pass 256² explicitly (the
