@@ -3,9 +3,16 @@
 Variant of RoboTwin's place_a2b_left / place_a2b_right with a symmetric layout so that the side is
 not inferable from the observation (design: docs/superpowers/specs/2026-10-17-leap-multimodal-steering-design.md):
 
-- ``self.steer_side`` in {"left", "right"} with p = 0.5 is the FIRST random draw of ``load_actors``
-  (``np.random.seed(seed)`` runs before it in ``_init_task_env_``, so the side is reproducible from
-  the seed in collection and evaluation alike).
+- The FIRST random draw of ``load_actors`` is a uniform ``u`` (``np.random.seed(seed)`` runs before
+  it in ``_init_task_env_``, so everything is reproducible from the seed in collection and
+  evaluation alike).  After the layout is sampled, ``self.steer_side`` is the side OPPOSITE to the
+  arm ("cross-midline") when ``u < P_CROSS[arm]`` and the arm's own side otherwise.
+  Cross-midline placements fail more often in the expert planner (measured on 2026-10-17 with a
+  50/50 draw: surviving episodes were left-arm 49 same / 16 cross, right-arm 30 same / 5 cross, so
+  the arm, which is visible in the observation, predicted the side ~80 % of the time).  The skewed
+  draw (default left 0.74, right 0.86; override with ``LEAP_STEER_P_CROSS="left=0.74,right=0.86"``)
+  makes the EXPERT-SURVIVING episodes roughly balanced per arm, both in collection and in the
+  official evaluation (which keeps only seeds the expert succeeds on).
 - A: x in [-0.22, 0.22], y in [-0.2, 0]; arm = right if A.x > 0 else left.
 - B: x in [-0.10, 0.10], y in [-0.2, 0]; resampled until xy-distance(A, B) >= 0.10 and |A.y - B.y| >= 0.10.
 - Expert: grasp A, lift 0.1 m, place at B + (-0.13, 0, 0) for left and B + (+0.13, 0, 0) for right.
@@ -32,6 +39,26 @@ import numpy as np
 
 SIDE_OFFSET = 0.13
 STEER_LOG_ENV = "LEAP_STEER_LOG"
+P_CROSS_ENV = "LEAP_STEER_P_CROSS"
+DEFAULT_P_CROSS = {"left": 0.74, "right": 0.86}   # P(side opposite to the arm | arm)
+OTHER_SIDE = {"left": "right", "right": "left"}
+
+
+def cross_probabilities():
+    """P(cross-midline side | arm) from ``LEAP_STEER_P_CROSS`` ("left=0.74,right=0.86") or the default."""
+    probs = dict(DEFAULT_P_CROSS)
+    spec = os.environ.get(P_CROSS_ENV, "").strip()
+    if spec:
+        for item in spec.split(","):
+            arm, value = item.split("=")
+            arm = arm.strip()
+            if arm not in probs:
+                raise ValueError(f"{P_CROSS_ENV}: unknown arm {arm!r}")
+            value = float(value)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{P_CROSS_ENV}: probability out of range for {arm}: {value}")
+            probs[arm] = value
+    return probs
 OBJECT_LIST = [
     "047_mouse",
     "048_stapler",
@@ -66,8 +93,9 @@ class place_a2b_side(place_a2b_left):
                     continue
             return available_ids
 
-        # First random draw of the episode: the side (reproducible from the seed).
-        self.steer_side = "left" if np.random.rand() < 0.5 else "right"
+        # First random draw of the episode (reproducible from the seed); the side is decided from it
+        # once the arm is known (see the module docstring).
+        self._steer_u = float(np.random.rand())
         self._steer_logged = False
 
         object_list = list(OBJECT_LIST)
@@ -98,6 +126,9 @@ class place_a2b_side(place_a2b_left):
             break
         else:
             raise RuntimeError("place_a2b_side: no valid layout after %d tries" % try_lim)
+
+        arm = "right" if rand_pos.p[0] > 0 else "left"
+        self.steer_side = OTHER_SIDE[arm] if self._steer_u < cross_probabilities()[arm] else arm
 
         self.selected_modelname_A = np.random.choice(object_list)
 

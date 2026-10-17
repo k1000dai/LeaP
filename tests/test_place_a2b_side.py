@@ -172,14 +172,19 @@ class StubbedTaskTest(unittest.TestCase):
 
     def test_side_is_first_draw_and_layout_is_symmetric(self):
         sides = []
+        cells = {("left", "left"): 0, ("left", "right"): 0, ("right", "left"): 0, ("right", "right"): 0}
+        p_cross = self.module.cross_probabilities()
         for seed in range(200):
             np.random.seed(seed)
-            expected_side = "left" if np.random.rand() < 0.5 else "right"
+            u = np.random.rand()
             np.random.seed(seed)
             task = self.make_task()
             task.load_actors()
-            self.assertEqual(task.steer_side, expected_side)
             a, b = task.object.get_pose().p, task.target_object.get_pose().p
+            arm = "right" if a[0] > 0 else "left"
+            expected_side = self.module.OTHER_SIDE[arm] if u < p_cross[arm] else arm
+            self.assertEqual(task.steer_side, expected_side)
+            cells[(arm, task.steer_side)] += 1
             self.assertTrue(-0.22 <= a[0] <= 0.22 and -0.2 <= a[1] <= 0)
             self.assertTrue(-0.10 <= b[0] <= 0.10 and -0.2 <= b[1] <= 0)
             self.assertGreaterEqual(np.hypot(*(a[:2] - b[:2])), 0.1)
