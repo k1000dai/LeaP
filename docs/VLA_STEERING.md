@@ -1,7 +1,7 @@
 # Steering a frozen VLA through a learned flow-matching prior (phase 3)
 
-Status: experiment running (2026-10-18). Results section is filled in when the
-campaign on robot_dev6 finishes. Design:
+Status: phase 3 evaluated (2026-10-18); phase 3b (counterfactual bowl-2 data)
+in progress on robot_dev6. Design:
 `docs/superpowers/specs/2026-10-17-vla-prior-steering-design.md`.
 
 ## Idea
@@ -121,7 +121,27 @@ prompt therefore removes little of the VLA's own preference, and the headroom
 for steering *toward bowl 1* is only 84.5 → 96 %. Steering against the
 layout preference (toward bowl 2) is the informative test; see phase 3b.
 
-Prior conditions: (pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla`)
+Prior conditions (same 200 episodes; x0 from `prior-none` for `none`, from
+`prior-concat` otherwise; `scripts/vla/collect_vla_results.py --out-dir outputs/vla`):
+
+| condition | σ-scale 1: success / bowl 1 | σ-scale 0: success / bowl 1 |
+|---|---|---|
+| neutral-prior, no instruction | 86.5 % / 87.0 % | 85.0 % / 86.0 % |
+| neutral-prior + text | 84.5 % / 87.0 % | 86.0 % / 88.0 % |
+| neutral-prior + sketch | 87.0 % / 87.5 % | 86.0 % / 87.0 % |
+| neutral-prior + audio | 86.5 % / 87.5 % | 86.5 % / 88.0 % |
+
+Every prior condition lies within 84.5–87.0 % success and 86–88 % bowl
+choice, i.e. within ±2.5 points of `neutral-gauss` (the standard error of a
+200-episode rate near 85 % is 2.5 points) and with the same per-task pattern:
+task 7 stays at 10–20 % success (bowl choice 15–20 %), tasks 1 and 9 at
+85–95 % and 75–85 %. The learned source — with or without the steering
+embedding, with or without its variance — changes neither the success nor
+the bowl choice of the frozen VLA. This is the expected outcome of the
+redundancy above: the reversed demonstrations give the prior no
+instruction-dependent target to learn (validation NLL 1.84 vs 1.92 for a
+global Gaussian), so its μ is close to a per-layout mean that the VLA's own
+conditioning already encodes.
 
 ## Prior training outcome (reversal labels from the demos)
 
