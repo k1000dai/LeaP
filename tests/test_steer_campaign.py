@@ -40,11 +40,10 @@ class SteerCampaignDriverTest(unittest.TestCase):
         self.assertIn("scripts/robotwin.py prepare", commands[2])
         self.assertIn("--episodes 100", commands[2])
         self.assertIn("scripts/robotwin.py collect", commands[3])
-        self.assertIn("generate data/raw/place_a2b_side/leap_steer/instructions", commands[4])
-        self.assertIn("scripts/robotwin.py convert --input data/raw/place_a2b_side/leap_steer/data", commands[5])
-        self.assertIn("scripts/make_instructions.py --raw data/raw/place_a2b_side/leap_steer", commands[6])
-        self.assertIn("scripts/embed_instructions.py --bundle", commands[7])
-        self.assertIn("scripts/instr_probe.py", commands[8])
+        self.assertIn("scripts/robotwin.py convert --input data/raw/place_a2b_side/leap_steer/data", commands[4])
+        self.assertIn("scripts/make_instructions.py --raw data/raw/place_a2b_side/leap_steer", commands[5])
+        self.assertIn("scripts/embed_instructions.py --bundle", commands[6])
+        self.assertIn("scripts/instr_probe.py", commands[7])
         trains = [c for c in commands if "leap.robotwin.train" in c]
         self.assertEqual([c.split("--config configs/steer_")[1].split(".yaml")[0] for c in trains],
                          ["noinstr", "prior", "cond", "both"])
@@ -107,9 +106,10 @@ class SideLogSummaryTest(unittest.TestCase):
                 result = robotwin / f"eval_result/place_a2b_side/leap.robotwin.deploy/leap_steer/{setting}/2026-01"
                 result.mkdir(parents=True)
                 (result / "_result.txt").write_text(f"Instruction Type: unseen\n\n{rate}\n")
-            lines = [{"phase": "expert", "side_correct": True, "success": True}]
-            lines += [{"side": "left", "side_correct": True, "success": True}] * 3
-            lines += [{"side": "right", "side_correct": False, "success": False}]
+            # One line per evaluated episode (ep_num); a repeated ep_num counts once.
+            lines = [{"side": "left", "side_correct": True, "success": True, "ep_num": i} for i in range(3)]
+            lines += [{"side": "right", "side_correct": False, "success": False, "ep_num": 3}]
+            lines += [{"side": "right", "side_correct": False, "success": False, "ep_num": 3}]
             (logs / "side_prior_text.jsonl").write_text("\n".join(json.dumps(line) for line in lines) + "\n")
             output = Path(temp) / "results.json"
             with patch.object(sys, "argv", ["collect_results.py", "--robotwin", str(robotwin), "--task-config",

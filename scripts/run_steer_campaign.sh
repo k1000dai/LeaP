@@ -129,7 +129,6 @@ if want config; then
       --save-path "$LEAP_ROOT/data/raw"
   fi
 fi
-LANGUAGE_NUM=100; [[ -f "$CFG" ]] && LANGUAGE_NUM=$(config_value language_num)
 
 if want collect; then
   log "=== [$TASK] collect $EPISODES episodes -> $RAW"
@@ -166,30 +165,9 @@ if want collect; then
       rm -rf "$RAW/.cache"
     done
   fi
-  # The official end-of-collection instruction generator cannot find scene_info.json when save_path is
-  # absolute (it joins the path onto description/utils/../../), so the same official functions run here.
-  if [[ $(ls "$RAW"/instructions/episode*.json 2>/dev/null | wc -l) -ge $EPISODES ]]; then
-    log "instructions present ($RAW/instructions)"
-  else
-    log "+ generate $RAW/instructions from scene_info.json (RoboTwin generate_episode_instructions, language_num=$LANGUAGE_NUM)"
-    dry || python - "$ROBOTWIN_ROOT" "$RAW" "$TASK" "$LANGUAGE_NUM" <<'EOF'
-import importlib.util, json, sys
-from pathlib import Path
-robotwin, raw, task, max_num = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
-spec = importlib.util.spec_from_file_location(
-    "generate_episode_instructions", robotwin / "description/utils/generate_episode_instructions.py")
-generator = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(generator)
-scene_info = json.loads((raw / "scene_info.json").read_text())
-episodes = generator.extract_episodes_from_scene_info(scene_info)
-results = generator.generate_episode_descriptions(task, episodes, max_num)
-(raw / "instructions").mkdir(exist_ok=True)
-for item in results:
-    (raw / "instructions" / f"episode{item['episode_index']}.json").write_text(
-        json.dumps({"seen": item["seen"], "unseen": item["unseen"]}, indent=2))
-print(f"wrote {len(results)} instruction files to {raw / 'instructions'}")
-EOF
-  fi
+  # RoboTwin's end-of-collection instruction generator cannot find scene_info.json when save_path is
+  # absolute, so no instructions/ directory appears here; scripts/make_instructions.py generates the
+  # texts itself from <raw>/scene_info.json with the same official functions (seeded per episode).
 fi
 
 if want convert; then

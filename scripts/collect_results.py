@@ -4,8 +4,9 @@ run_steer_campaign.sh.
 Prints a Markdown table and writes JSON. Reads ROBOTWIN_ROOT/eval_result/<task>/leap.robotwin.deploy/
 <task_config>/<ckpt_setting>/<timestamp>/_result.txt (official layout, newest timestamp per setting).
 With --side-logs DIR, the side-following diagnostics that place_a2b_side appends to $LEAP_STEER_LOG
-(DIR/side_<variant>_<modality>.jsonl, one JSON line per check_success call with "side_correct" and
-"success") are summarised per setting <variant>-s<seed>-<modality> in a second table.
+(DIR/side_<variant>_<modality>.jsonl, one JSON line per policy rollout with "ep_num", "side_correct"
+and "success"; episodes that died before check_success have no line) are summarised per setting
+<variant>-s<seed>-<modality> in a second table.
 """
 import argparse
 import json
@@ -22,9 +23,10 @@ def side_log_name(setting):
 
 
 def summarize_side_log(path):
-    """Rates over the policy-rollout lines of one side log (lines marked as expert checks are ignored)."""
+    """Rates over one side log, one entry per evaluated episode (the last line per ep_num wins)."""
     lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    lines = [line for line in lines if line.get("phase", "policy") == "policy"]
+    by_episode = {line.get("ep_num", index): line for index, line in enumerate(lines)}
+    lines = list(by_episode.values())
     if not lines:
         return {"episodes": 0}
     mean = lambda key: sum(bool(line.get(key)) for line in lines) / len(lines)  # noqa: E731
