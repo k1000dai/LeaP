@@ -107,7 +107,21 @@ neutral-gauss; neutral-prior (none); neutral-prior × {text, sketch, audio} ×
 
 ## Results
 
-(pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla`)
+Reference conditions (10 tasks × 20 episodes, init states 0–19):
+
+| condition | success | bowl choice = bowl 1 | notes |
+|---|---|---|---|
+| full-prompt (original language, Gaussian noise) | 96.0 % (192/200) | 99.5 % | per task 0.80–1.00 |
+| neutral-gauss (neutral prompt, Gaussian noise) | 84.5 % (169/200) | 90 % | task 7 drops to 5 % (bowl choice 10 %); tasks 1 and 9 to 80 % and 75 %; the other seven stay at 95–100 % |
+
+Under the neutral prompt the VLA still picks bowl 1 in 9 of 10 layouts: the
+fine-tuned policy has learned the layout → bowl association from the demos,
+so the language is not what selects the bowl in most layouts. The neutral
+prompt therefore removes little of the VLA's own preference, and the headroom
+for steering *toward bowl 1* is only 84.5 → 96 %. Steering against the
+layout preference (toward bowl 2) is the informative test; see phase 3b.
+
+Prior conditions: (pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla`)
 
 ## Prior training outcome (reversal labels from the demos)
 
