@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import sys
 
-from robotwin import verified_root, ROOT
+from robotwin import ROOT, add_instruction_arguments, instruction_config, verified_root
 
 
 class LimitedComplete(Exception):
@@ -32,9 +32,11 @@ def main():
     parser.add_argument("--episodes", type=int, required=True)
     parser.add_argument("--intervention", type=json.loads, default=None)
     parser.add_argument("--output", type=Path, help="JSON result file")
+    add_instruction_arguments(parser)
     args = parser.parse_args()
     if args.episodes < 1 or args.episodes >= 100:
         parser.error("--episodes must be in [1, 99]; use scripts/robotwin.py eval for the official 100")
+    instructions = instruction_config(args, parser)
     root = verified_root(args.robotwin, "script/eval_policy.py")
     checkpoint = args.checkpoint.resolve()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -53,6 +55,7 @@ def main():
         result = {"protocol": "limited", "benchmark_score": False, "task": args.task,
                   "episodes": args.episodes, "successes": int(successes),
                   "success_rate": successes / args.episodes, "intervention": args.intervention,
+                  "instruction_modality": args.instruction_modality,
                   "checkpoint": str(checkpoint), "seed": args.seed, "next_seed": next_seed}
         print(json.dumps(result), flush=True)
         if args.output:
@@ -66,7 +69,7 @@ def main():
                        "task_config": args.task_config, "ckpt_setting": "limited-only",
                        "ckpt_path": str(checkpoint), "seed": args.seed,
                        "instruction_type": "unseen", "device": "cuda:0",
-                       "intervention": args.intervention})
+                       "intervention": args.intervention, **instructions})
     except LimitedComplete:
         pass
 

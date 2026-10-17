@@ -1,4 +1,10 @@
-"""Standalone LeaP training on RoboTwin Zarr demonstrations."""
+"""Standalone LeaP training on RoboTwin Zarr demonstrations.
+
+Instruction steering: when the config's policy.instr_mode is not "none", the
+instruction bundle `<data with .zarr -> .instr>/embeddings.npz` (or --instr)
+is loaded, its training-set mean/std are stored in the policy, and each window
+carries obs["instr"] sampled over training.instr_modalities.
+"""
 import argparse
 import copy
 import json
@@ -40,10 +46,30 @@ def main():
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--episodes", type=int)
     parser.add_argument("--max-steps", type=int, help="Stop after this many updates (smoke test only)")
+    parser.add_argument("--instr", help="Instruction bundle directory or its embeddings.npz "
+                        "(default: <data>.instr/embeddings.npz)")
+    parser.add_argument("--instr-modalities", help="Comma-separated subset of text,sketch,audio "
+                        "(overrides training.instr_modalities)")
     args = parser.parse_args()
     with open(args.config) as stream:
         config = yaml.safe_load(stream)
     training = config["training"]
+    policy_config = dict(config["policy"])
+    instr_mode = policy_config.get("instr_mode", "none")
+    instr_modalities = (args.instr_modalities.split(",") if args.instr_modalities
+                        else training.get("instr_modalities", ["text", "sketch", "audio"]))
+    instr_modalities = [name.strip() for name in instr_modalities if name.strip()]
+    instr_path = None
+    if instr_mode != "none":
+        instr_path = Path(args.instr) if args.instr else Path(args.data).with_suffix(".instr")
+        if instr_path.is_dir():
+            instr_path = instr_path / "embeddings.npz"
+        if not instr_path.is_file():
+            parser.error(f"policy.instr_mode={instr_mode!r} needs an instruction bundle; not found: {instr_path}")
+        if not instr_modalities:
+            parser.error("instr_modalities must name at least one modality")
+    elif args.instr or args.instr_modalities:
+        print("Ignoring --instr/--instr-modalities: policy.instr_mode is 'none'", flush=True)
     epochs = args.epochs if args.epochs is not None else training["epochs"]
     batch_size = args.batch_size if args.batch_size is not None else training["batch_size"]
     if epochs < 1 or batch_size < 1 or (args.max_steps is not None and args.max_steps < 1):
@@ -53,14 +79,16 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    policy_config = dict(config["policy"])
     dataset = RobotDataset(args.data, horizon=policy_config["horizon"],
                            n_obs_steps=policy_config["n_obs_steps"],
                            n_action_steps=policy_config["n_action_steps"], episodes=args.episodes,
-                           val_ratio=training.get("val_ratio", 0.02), seed=args.seed)
+                           val_ratio=training.get("val_ratio", 0.02), seed=args.seed,
+                           instr_path=instr_path, instr_modalities=instr_modalities)
     policy_config["shape_meta"] = dataset.shape_meta
     model = LeaPPolicy(**policy_config)
     model.set_normalizer(dataset.get_normalizer())
+    if instr_path is not None:
+        model.set_instr_stats(*dataset.instr_stats())
     model.to(args.device)
     ema = copy.deepcopy(model).eval().requires_grad_(False)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=args.workers,
@@ -80,7 +108,10 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     with (output / "run.json").open("w") as stream:
         json.dump({"args": vars(args), "config": config, "policy_config": policy_config,
-                   "training_windows": len(dataset)}, stream, indent=2)
+                   "training_windows": len(dataset),
+                   "instr": {"mode": instr_mode, "path": None if instr_path is None else str(instr_path.resolve()),
+                             "modalities": instr_modalities if instr_path is not None else []}},
+                  stream, indent=2)
     step = 0
     with (output / "metrics.jsonl").open("w") as log:
         for epoch in range(epochs):

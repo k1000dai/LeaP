@@ -21,6 +21,11 @@ three terms:
 
 This single file collapses the original 4-level research inheritance into one
 self-contained class; behavior is identical to the paper's main model.
+
+Instruction steering (``instr_mode``, default "none" = the model above): a
+768-d instruction embedding ``obs["instr"]`` (B, instr_dim), standardised
+with stored training statistics and passed through an adapter MLP to z_e, can
+enter the prior head ("prior"), the velocity-net condition ("cond") or both.
 """
 from typing import Dict, Tuple
 
@@ -59,26 +64,33 @@ class LeaPPrior(nn.Module):
 
     def __init__(self, state_dim, action_dim, n_obs_steps,
                  encoder_output_dim=128, encoder_hidden_dims=(128, 128),
-                 learnable=True):
+                 learnable=True, instr_feature_dim=0):
         super().__init__()
+        if instr_feature_dim and not learnable:
+            raise ValueError("A NoPrior source has no head to receive an instruction feature")
         self.action_dim = action_dim
         self.n_obs_steps = n_obs_steps
         self.learnable = learnable
+        self.instr_feature_dim = instr_feature_dim
         self.state_encoder = _make_mlp(state_dim, encoder_hidden_dims, encoder_output_dim)
         dist_feature_dim = encoder_output_dim * n_obs_steps
         # NoPrior baseline keeps the state encoder (flow condition) but has no
-        # distribution head: its source is the standard N(0, I).
+        # distribution head: its source is the standard N(0, I). With an
+        # instruction feature the head sees cat(z_s over To, z_e).
+        head_dim = dist_feature_dim + instr_feature_dim
         self.head = nn.Sequential(
-            nn.LayerNorm(dist_feature_dim),
-            nn.Linear(dist_feature_dim, 512),
+            nn.LayerNorm(head_dim),
+            nn.Linear(head_dim, 512),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(512, action_dim * 2),     # -> (mu, log_var)
         ) if learnable else None
 
-    def forward(self, state):
-        """state: (B, To, state_dim) -> mu, log_var each (B, action_dim).
+    def forward(self, state, instr_feat=None):
+        """state: (B, To, state_dim) -> mu, log_var each (B, action_dim), plus z_s.
 
+        instr_feat (B, instr_feature_dim) is required iff the prior was built
+        with instr_feature_dim > 0 and is concatenated to the head input.
         For the NoPrior baseline mu is zero and log_var is zero (sigma = 1),
         detached from the graph, so the same sampling code yields N(0, I).
         """
@@ -87,7 +99,12 @@ class LeaPPrior(nn.Module):
         if self.head is None:
             zeros = torch.zeros((B, self.action_dim), device=state.device, dtype=state.dtype)
             return zeros, zeros.clone(), z_s
-        dist_params = self.head(z_s.reshape(B, -1))
+        head_input = z_s.reshape(B, -1)
+        if (instr_feat is None) != (self.instr_feature_dim == 0):
+            raise ValueError("instr_feat must be given exactly when the prior has instr_feature_dim > 0")
+        if instr_feat is not None:
+            head_input = torch.cat([head_input, instr_feat], dim=-1)
+        dist_params = self.head(head_input)
         mu, log_var = dist_params.chunk(2, dim=-1)
         log_var = torch.clamp(log_var, min=-10.0, max=5.0)
         return mu, log_var, z_s
@@ -122,10 +139,21 @@ class LeaPPolicy(BasePolicy):
                  flow_net_time_embed_dim: int = 256,
                  # ---- "leap" (learned source) or "none" (N(0, I) NoPrior baseline) ----
                  prior_type: str = "leap",
+                 # ---- instruction entry point: "none" | "prior" | "cond" | "both" ----
+                 instr_mode: str = "none",
+                 instr_dim: int = 768,
+                 instr_adapter_hidden: int = 256,
+                 instr_feature_dim: int = 128,
                  **kwargs):
         super().__init__()
         if prior_type not in ("leap", "none"):
             raise ValueError(f"prior_type must be 'leap' or 'none', got {prior_type!r}")
+        if instr_mode not in ("none", "prior", "cond", "both"):
+            raise ValueError(f"instr_mode must be one of none/prior/cond/both, got {instr_mode!r}")
+        instr_to_prior = instr_mode in ("prior", "both")
+        instr_to_cond = instr_mode in ("cond", "both")
+        if instr_to_prior and prior_type == "none":
+            raise ValueError(f"instr_mode={instr_mode!r} needs a learnable prior head; prior_type is 'none'")
 
         action_shape = shape_meta['action']['shape']
         action_dim = action_shape[0] if len(action_shape) == 1 else action_shape[0] * action_shape[1]
@@ -134,6 +162,8 @@ class LeaPPolicy(BasePolicy):
         state_dim = obs_meta['agent_pos']['shape'][-1]
         if not use_pc_color:
             pc_in_dim = min(pc_in_dim, 3)
+        if instr_mode != "none" and "instr" in obs_meta and obs_meta["instr"]["shape"][-1] != instr_dim:
+            raise ValueError(f"shape_meta instr dim {obs_meta['instr']['shape'][-1]} != instr_dim {instr_dim}")
 
         # ---- point-cloud encoder (DP3 PointNet) ----
         if pointcloud_encoder_cfg is None:
@@ -146,10 +176,21 @@ class LeaPPolicy(BasePolicy):
             pointcloud_encoder_cfg["out_channels"] = encoder_output_dim
         self.pc_encoder = (PointNetEncoderXYZRGB if use_pc_color else PointNetEncoderXYZ)(**pointcloud_encoder_cfg)
 
-        # ---- LeaP learnable source prior (state-only) ----
+        # ---- instruction adapter: standardised embedding -> z_e (only with instr_mode) ----
+        if instr_mode != "none":
+            self.register_buffer("instr_mean", torch.zeros(instr_dim))
+            self.register_buffer("instr_std", torch.ones(instr_dim))
+            self.instr_adapter = nn.Sequential(
+                nn.Linear(instr_dim, instr_adapter_hidden), nn.ReLU(),
+                nn.Linear(instr_adapter_hidden, instr_feature_dim))
+        else:
+            self.instr_adapter = None
+
+        # ---- LeaP learnable source prior (state-only, plus z_e for "prior"/"both") ----
         self.prior = LeaPPrior(state_dim, action_dim, n_obs_steps,
                                encoder_output_dim, encoder_hidden_dims,
-                               learnable=prior_type == "leap")
+                               learnable=prior_type == "leap",
+                               instr_feature_dim=instr_feature_dim if instr_to_prior else 0)
 
         # ---- alignment projection heads (InfoNCE); unused by NoPrior ----
         if prior_type == "leap":
@@ -160,13 +201,13 @@ class LeaPPolicy(BasePolicy):
 
         # ---- flow velocity net + matcher (operate on flattened H*A chunk) ----
         flow_dim = horizon * action_dim
-        # obs condition = cat(z_pc, z_s) flattened over To
+        # obs condition = cat(z_pc, z_s) flattened over To, plus z_e for "cond"/"both"
         self.obs_feature_dim = (encoder_output_dim * 2) * n_obs_steps
         self.flow_net = SimpleFlowNet(
             input_dim=flow_dim, hidden_dim=flow_net_hidden_dim, output_dim=flow_dim,
             num_layers=flow_net_num_layers, mlp_ratio=flow_net_mlp_ratio,
             dropout=flow_net_dropout, time_embed_dim=flow_net_time_embed_dim,
-            condition_dim=self.obs_feature_dim)
+            condition_dim=self.obs_feature_dim + (instr_feature_dim if instr_to_cond else 0))
         self.flow_matcher = SimpleConditionalFlowMatcher(
             num_sampling_steps=num_sampling_steps, sigma=flow_matcher_sigma)
 
@@ -182,6 +223,9 @@ class LeaPPolicy(BasePolicy):
         self.align_loss_weight = align_loss_weight
         self.align_temperature = align_temperature
         self.prior_type = prior_type
+        self.instr_mode = instr_mode
+        self.instr_dim = instr_dim
+        self.instr_feature_dim = instr_feature_dim
         self.prior_intervention = None
 
         if prior_type == "leap":
@@ -191,7 +235,29 @@ class LeaPPolicy(BasePolicy):
         else:
             cprint(f"[LeaP] NoPrior baseline: N(0, I) source + linear-OT flow matcher  NFE={num_sampling_steps}",
                    "yellow")
+        if instr_mode != "none":
+            cprint(f"[LeaP] instruction {instr_dim}-d -> adapter -> {instr_feature_dim}-d entering: "
+                   f"{'prior head' if instr_to_prior else ''}{' + ' if instr_mode == 'both' else ''}"
+                   f"{'velocity-net condition' if instr_to_cond else ''}", "green")
         print_params(self)
+
+    # ------------------------------------------------------------------
+    # Instruction embedding statistics (set from the training bundle, stored
+    # as buffers so checkpoints carry them)
+    # ------------------------------------------------------------------
+    def set_instr_stats(self, mean, std):
+        """Per-dimension mean/std used to standardise obs["instr"] before the adapter."""
+        if self.instr_mode == "none":
+            raise RuntimeError("set_instr_stats is only meaningful when instr_mode != 'none'")
+        mean = torch.as_tensor(mean, dtype=torch.float32).reshape(-1)
+        std = torch.as_tensor(std, dtype=torch.float32).reshape(-1)
+        if mean.numel() != self.instr_dim or std.numel() != self.instr_dim:
+            raise ValueError(f"instr stats must have {self.instr_dim} entries")
+        if not torch.isfinite(mean).all() or not (std > 0).all():
+            raise ValueError("instr stats must be finite with strictly positive std")
+        with torch.no_grad():
+            self.instr_mean.copy_(mean)
+            self.instr_std.copy_(std)
 
     # ------------------------------------------------------------------
     # Inference-time prior intervention (default off; training unaffected)
@@ -245,8 +311,31 @@ class LeaPPolicy(BasePolicy):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     # ------------------------------------------------------------------
-    def _encode_obs(self, nobs):
-        """Returns (mu, log_var, z_obs) where z_obs is the flow condition."""
+    @staticmethod
+    def _split_instr(obs_dict):
+        """obs_dict -> (normalisable obs, raw instr or None).
+
+        "instr" is a raw embedding that the LinearNormalizer does not know; it
+        is standardised by the policy's own instr_mean/instr_std instead.
+        """
+        obs = {key: value for key, value in obs_dict.items() if key != "instr"}
+        return obs, obs_dict.get("instr")
+
+    def _encode_instr(self, instr):
+        """instr (B, instr_dim) float -> z_e (B, instr_feature_dim)."""
+        if instr is None:
+            raise ValueError(f"instr_mode={self.instr_mode!r} requires obs['instr'] of shape (B, {self.instr_dim})")
+        instr = torch.as_tensor(instr).to(self.instr_mean)
+        if instr.ndim != 2 or instr.shape[-1] != self.instr_dim:
+            raise ValueError(f"obs['instr'] must have shape (B, {self.instr_dim}), got {tuple(instr.shape)}")
+        return self.instr_adapter((instr - self.instr_mean) / self.instr_std)
+
+    def _encode_obs(self, nobs, instr=None):
+        """Returns (mu, log_var, z_obs) where z_obs is the flow condition.
+
+        instr is the raw instruction embedding (B, instr_dim); it is ignored
+        when instr_mode is "none" and required otherwise.
+        """
         pc = nobs["point_cloud"]
         if not self.use_pc_color:
             pc = pc[..., :3]
@@ -256,8 +345,12 @@ class LeaPPolicy(BasePolicy):
         B, To, npts, cdim = pc.shape
 
         pc_feat = self.pc_encoder(pc.reshape(B * To, npts, cdim)).reshape(B, To, -1)
-        mu, log_var, z_s = self.prior(state)                       # prior from state only
+        z_e = self._encode_instr(instr) if self.instr_mode != "none" else None
+        # prior from state only, or state + instruction for "prior"/"both"
+        mu, log_var, z_s = self.prior(state, z_e if self.prior.instr_feature_dim else None)
         z_obs = torch.cat([pc_feat, z_s], dim=-1).reshape(B, -1)   # flow condition uses pc + state
+        if self.instr_mode in ("cond", "both"):
+            z_obs = torch.cat([z_obs, z_e], dim=-1)                # ... + instruction
         return mu, log_var, z_obs
 
     def _flow_velocity(self, x_flat, t, global_cond):
@@ -279,13 +372,14 @@ class LeaPPolicy(BasePolicy):
         return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.transpose(0, 1), labels))
 
     def compute_loss(self, batch):
-        nobs = self.normalizer.normalize(batch['obs'])
+        obs, instr = self._split_instr(batch['obs'])
+        nobs = self.normalizer.normalize(obs)
         nactions = self.normalizer['action'].normalize(batch['action'])
         if nactions.ndim == 4:
             nactions = nactions.reshape(nactions.shape[0], nactions.shape[1], -1)
         B, T, A = nactions.shape
 
-        mu, log_var, z_obs = self._encode_obs(nobs)
+        mu, log_var, z_obs = self._encode_obs(nobs, instr)
         x0 = self.prior.sample(mu, log_var, T)                    # learned source (B, T, A)
 
         loss_flow, _ = self.flow_matcher.compute_loss(
@@ -309,13 +403,15 @@ class LeaPPolicy(BasePolicy):
         Call ``eval()`` before inference to disable dropout. The source remains
         stochastic; seed PyTorch externally for reproducible evaluations.
         Only the first ``n_obs_steps`` frames condition the prediction, even
-        when a complete training window is supplied.
+        when a complete training window is supplied. With ``instr_mode`` set,
+        ``obs_dict["instr"]`` is one raw embedding per batch row, (B, instr_dim).
         """
-        nobs = self.normalizer.normalize(obs_dict)
+        obs, instr = self._split_instr(obs_dict)
+        nobs = self.normalizer.normalize(obs)
         B = next(iter(nobs.values())).shape[0]
         T, A = self.horizon, self.action_dim
 
-        mu, log_var, z_obs = self._encode_obs(nobs)
+        mu, log_var, z_obs = self._encode_obs(nobs, instr)
         mu, log_var = self._apply_prior_intervention(mu, log_var)
         if self.prior_intervention and self.prior_intervention.get("direct_mu"):
             x = mu.unsqueeze(1).expand(B, T, A).reshape(B, T * A)

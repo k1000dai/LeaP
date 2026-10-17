@@ -13,6 +13,26 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+INSTRUCTION_MODALITIES = ("none", "text", "sketch", "audio")
+
+
+def add_instruction_arguments(parser):
+    """Evaluation-time instruction flags shared by the official and limited launchers."""
+    parser.add_argument("--instruction-modality", choices=INSTRUCTION_MODALITIES, default="none",
+                        help="Instruction built per episode for instruction-conditioned checkpoints")
+    parser.add_argument("--embedder", default="google/embeddinggemma-2", help="Instruction embedding model")
+    parser.add_argument("--tts-voice", type=Path, help="Piper voice .onnx; required with audio")
+    parser.add_argument("--instr-dump-dir", type=Path, help="Save each episode's instruction here")
+
+
+def instruction_config(args, parser):
+    """Deploy keys for the instruction flags; the TTS voice must exist for audio."""
+    if args.instruction_modality == "audio" and not (args.tts_voice and args.tts_voice.is_file()):
+        parser.error("--tts-voice must be an existing Piper voice file when --instruction-modality is audio")
+    return {"instruction_modality": args.instruction_modality, "embedder": args.embedder,
+            "tts_voice": str(args.tts_voice.resolve()) if args.tts_voice else None,
+            "instr_dump_dir": str(args.instr_dump_dir.resolve()) if args.instr_dump_dir else None}
+
 
 def verified_root(path, script):
     root = path.resolve()
@@ -47,6 +67,7 @@ def main():
                              help="Label used in the official eval_result/ path")
             sub.add_argument("--intervention", type=json.loads, default=None,
                              help="JSON prior intervention, e.g. '{\"sigma_scale\": 0}'")
+            add_instruction_arguments(sub)
     convert = commands.add_parser("convert")
     convert.add_argument("--input", type=Path, required=True, help="Directory containing episode*.hdf5")
     convert.add_argument("--output", type=Path, required=True)
@@ -87,7 +108,7 @@ def main():
                   "task_config": args.task_config, "ckpt_setting": args.ckpt_setting,
                   "ckpt_path": str(args.checkpoint.resolve()), "seed": args.seed,
                   "instruction_type": "unseen", "device": "cuda:0",
-                  "intervention": args.intervention}
+                  "intervention": args.intervention, **instruction_config(args, parser)}
         with tempfile.TemporaryDirectory(prefix="leap-eval-") as directory:
             config_path = Path(directory) / "deploy.yml"
             config_path.write_text(yaml.safe_dump(deploy))
