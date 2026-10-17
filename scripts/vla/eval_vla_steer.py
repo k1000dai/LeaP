@@ -17,6 +17,11 @@ episode, success, bowl_choice, steps, condition, modality, sigma_scale, seed, ..
 (task, episode) pairs are skipped on restart, and <out>/summary.json is rebuilt from the log at the
 end.  MUJOCO_GL defaults to egl.
 
+--target-bowl 2 (counterfactual, leap.vla.counterfactual): the instruction and the full prompt name
+akita_black_bowl_2 (its spatial phrase from the task's BDDL init block), the sketch circles bowl 2, success is
+bowl 2 on the plate (LIBERO's On predicate on that bowl) and "target" in bowl_choice means bowl 2; LIBERO's own
+bowl-1 success is logged as libero_success.
+
 The instruction embedder (google/embeddinggemma-2) needs a newer transformers than LeRobot pins, so
 --embedder-python PATH runs it in a worker process under that interpreter (this file with
 --embed-worker); without it the embedder runs in-process.
@@ -70,6 +75,11 @@ def import_libero_scene():
 def import_instructions():
     from leap.vla import instructions
     return instructions
+
+
+def import_counterfactual():
+    from leap.vla import counterfactual
+    return counterfactual
 
 
 def make_tts(voice):
@@ -224,6 +234,9 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dump-instructions", action="store_true",
                         help="Save the text/sketch/wav instruction of every episode under <out>/instructions/")
+    parser.add_argument("--target-bowl", type=int, choices=(1, 2), default=1,
+                        help="Bowl the instruction names and success is judged for (2: the counterfactual bowl, "
+                             "leap.vla.counterfactual; LIBERO's own bowl-1 success is logged as libero_success)")
     parser.add_argument("--embed-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.embed_worker:
@@ -290,7 +303,7 @@ def summarize(records):
 
 def write_summary(out, args, records):
     summary = {"condition": args.condition, "modality": args.instr_modality, "sigma_scale": args.sigma_scale,
-               "seed": args.seed, "suite": args.suite, "checkpoint": args.checkpoint,
+               "seed": args.seed, "suite": args.suite, "checkpoint": args.checkpoint, "target_bowl": args.target_bowl,
                "prior": None if args.prior is None else str(args.prior), "num_steps": args.num_steps,
                "n_action_steps": args.n_action_steps, "tasks_requested": args.task_ids,
                "episodes_per_task": args.episodes}
@@ -360,6 +373,9 @@ class Evaluator:
         self.suite = self.scene.load_suite(args.suite)
         self.neutral_prompt = self.scene.NEUTRAL_PROMPT
         self.max_steps = args.max_steps or self.scene.max_steps(args.suite)
+        # --target-bowl 2: the instruction names bowl 2 and success is bowl 2 on the plate (phrases per task cached).
+        self.counterfactual = import_counterfactual() if args.target_bowl != 1 else None
+        self.phrases = {}
 
     def close(self):
         if hasattr(self.embedder, "close"):
@@ -367,6 +383,20 @@ class Evaluator:
 
     def prompt(self, task_language):
         return task_language if self.args.condition == "full-prompt" else self.neutral_prompt
+
+    def target_language(self, task_id, task_language):
+        """The language naming the intended bowl: the task's own for bowl 1, its bowl-2 phrase version for bowl 2."""
+        if self.counterfactual is None:
+            return task_language
+        if task_id not in self.phrases:
+            self.phrases[task_id] = self.counterfactual.bowl_phrases(self.suite, task_id)
+        return self.counterfactual.target_prompt(task_language, self.phrases[task_id], self.args.target_bowl)
+
+    def episode_success(self, env, info):
+        """Success of the intended bowl for this step: LIBERO's flag for bowl 1, ``bowl_on_plate`` for bowl 2."""
+        if self.counterfactual is None:
+            return bool(info.get("is_success", False))
+        return bool(self.counterfactual.bowl_on_plate(env, self.args.target_bowl))
 
     def build_instruction(self, env, obs, task_language, layout):
         """(embedding [768] or None, artefacts {text, sketch, audio}) for one episode."""
@@ -377,7 +407,11 @@ class Evaluator:
         artefacts, sketch, audio = {"text": text}, None, None
         if modality == "sketch" or (modality == "none" and self.args.dump_instructions):
             camera = self.scene.agentview_camera(env)
-            sketch = self.instructions.build_sketch(self.scene.policy_view(obs["pixels"]["image"]), camera, layout)
+            frame = self.scene.policy_view(obs["pixels"]["image"])
+            if self.counterfactual is None:
+                sketch = self.instructions.build_sketch(frame, camera, layout)
+            else:
+                sketch = self.counterfactual.build_bowl_sketch(frame, camera, layout, self.args.target_bowl)
             artefacts["sketch"] = sketch
         if modality == "audio":
             audio = self.instructions.build_audio(text, self.tts)
@@ -410,12 +444,13 @@ class Evaluator:
         obs, _ = reset_to_episode(env, episode, seed)
         layout = self.scene.scene_layout(env)
         tracker = self.scene.BowlChoiceTracker(layout)
-        embedding, artefacts = self.build_instruction(env, obs, task_language, layout)
+        language = self.target_language(task_id, task_language)
+        embedding, artefacts = self.build_instruction(env, obs, language, layout)
         instr = None
         if embedding is not None:
             instr = self.torch.as_tensor(embedding, dtype=self.torch.float32, device=self.args.device).unsqueeze(0)
-        prompt = self.prompt(task_language)
-        steps, success, choice, done, diagnostics = 0, False, "none", False, []
+        prompt = self.prompt(language)
+        steps, success, libero_success, choice, done, diagnostics = 0, False, False, "none", False, []
         with self.torch.inference_mode():
             while not done:
                 actions, diag = self.policy_actions(obs, prompt, instr)
@@ -425,14 +460,18 @@ class Evaluator:
                     obs, _, terminated, truncated, info = env.step(np.asarray(action, dtype=np.float32))
                     steps += 1
                     choice = tracker.update(env)
-                    success = success or bool(info.get("is_success", False))
+                    libero_success = libero_success or bool(info.get("is_success", False))
+                    success = success or self.episode_success(env, info)
                     if terminated or truncated or success or steps >= self.max_steps:
                         done = True
                         break
+        if self.counterfactual is not None:
+            choice = self.counterfactual.intended_choice(choice, self.args.target_bowl)
         record = {"task_id": task_id, "task_language": task_language, "episode": episode, "success": success,
                   "bowl_choice": choice, "steps": steps, "condition": self.args.condition,
                   "modality": self.args.instr_modality, "sigma_scale": self.args.sigma_scale, "seed": seed,
-                  "prompt": prompt, "elapsed_s": round(time.time() - started, 2)}
+                  "prompt": prompt, "elapsed_s": round(time.time() - started, 2),
+                  "target_bowl": self.args.target_bowl, "target_language": language, "libero_success": libero_success}
         if diagnostics:
             record["prior_mu_abs"] = float(np.mean([d[0] for d in diagnostics]))
             record["prior_sigma"] = float(np.mean([d[1] for d in diagnostics]))

@@ -112,7 +112,7 @@ Reference conditions (10 tasks × 20 episodes, init states 0–19):
 | condition | success | bowl choice = bowl 1 | notes |
 |---|---|---|---|
 | full-prompt (original language, Gaussian noise) | 96.0 % (192/200) | 99.5 % | per task 0.80–1.00 |
-| neutral-gauss (neutral prompt, Gaussian noise) | 84.5 % (169/200) | 90 % | task 7 drops to 5 % (bowl choice 10 %); tasks 1 and 9 to 80 % and 75 %; the other seven stay at 95–100 % |
+| neutral-gauss (neutral prompt, Gaussian noise) | 84.5 % (169/200) | 86.5 % (173/20/7) | task 7 drops to 5 % (bowl choice 10 %); tasks 1 and 9 to 80 % and 75 %; the other seven stay at 95–100 % |
 
 Under the neutral prompt the VLA still picks bowl 1 in 9 of 10 layouts: the
 fine-tuned policy has learned the layout → bowl association from the demos,
@@ -144,10 +144,28 @@ observation. The counterfactual extension below addresses this.
 ## Counterfactual bowl-2 data (phase 3b, in progress)
 
 The frozen VLA is prompted, per layout, with the spatial phrase of bowl 2
-(derived from the BDDL init regions) to produce successful bowl-2 rollouts;
-their predicted chunks are reversed under the neutral prompt, giving noise
-labels where the instruction, not the layout, decides the bowl. The prior is
-then trained on both bowls and evaluated with instructions for either bowl.
+(derived from the BDDL init regions; every bowl-2 phrase is the bowl-1 phrase
+of another task, so the prompts are sentences the checkpoint was fine-tuned
+on) to produce successful bowl-2 rollouts; their predicted chunks are reversed
+under the neutral prompt, giving noise labels where the instruction, not the
+layout, decides the bowl. The prior is then trained on both bowls and
+evaluated with instructions for either bowl (`leap/vla/counterfactual.py`,
+`scripts/vla/rollout_counterfactual.py`, `scripts/vla/reverse_rollouts.py`,
+`scripts/vla/eval_vla_steer.py --target-bowl 2`).
+
+Pilot (tasks 0–1, init states 0–4, bowl-2 success = LIBERO's `On` predicate
+on bowl 2):
+
+| task | bowl-1 prompt (task language) | bowl-2 prompt | bowl 1 on plate | bowl 2 on plate |
+|---|---|---|---|---|
+| 0 | … between the plate and the ramekin … | … next to the ramekin … | 5/5 | **0/5** (all five episodes lift bowl 1) |
+| 1 | … next to the ramekin … | … next to the cookie box … | 5/5 | 3/5 (2 lift bowl 1) |
+
+The VLA's own language channel is weak against its layout preference: in
+layout 0 the bowl-2 sentence does not change the bowl at all, in layout 1 it
+does in 3 of 5 episodes. Counterfactual labels therefore exist only for the
+layouts in which the VLA can be talked into bowl 2; the full collection (10
+tasks × 2 bowls × 20 init states) is run to find out which these are.
 
 ## Notes
 
