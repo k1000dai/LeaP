@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 from leap.steer.bundle import (AUDIO_VARIANTS, MANIFEST_FILE, SIDE_INDEX, TEXT_VARIANTS, bundle_path,
                                episode_dir, read_episode_ends)
-from leap.steer.sketch import draw_sketch, sketch_pixels
+from leap.steer.sketch import render_sketch, sketch_pixels
 from leap.steer.tts import PiperTTS, save_wav
 
 DEFAULT_VOICE = ROOT / "data/voices/en_US-lessac-medium.onnx"
@@ -92,7 +92,8 @@ def load_frame0(hdf5_path):
 def make_sketch(hdf5_path, steer, sketch_path, meta_path):
     rgb, intrinsic, extrinsic = load_frame0(hdf5_path)
     object_px, target_px = sketch_pixels(intrinsic, extrinsic, steer["A_xyz"], steer["target_xyz"], *rgb.size)
-    draw_sketch(rgb, object_px, target_px).save(sketch_path)
+    # render_sketch draws on a white canvas of the frame's size (same function as the evaluator).
+    render_sketch(rgb, intrinsic, extrinsic, steer["A_xyz"], steer["target_xyz"]).save(sketch_path)
     meta_path.write_text(json.dumps({"frame": 0, "side": steer["side"], "object_px": list(object_px),
                                      "target_px": list(target_px), "A_xyz": steer["A_xyz"],
                                      "target_xyz": steer["target_xyz"], "image_size": list(rgb.size)}, indent=2))
