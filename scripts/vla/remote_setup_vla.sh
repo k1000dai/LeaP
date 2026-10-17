@@ -86,8 +86,11 @@ mujoco==3.8.1
 robosuite==1.4.0
 numpy==2.2.6
 EOF
+# zarr/termcolor: leap/__init__.py imports leap.policy -> leap.normalizer (zarr) and termcolor,
+# so anything under leap.vla needs them even though the leap package itself is not installed
+# here (its setup.py pins numpy<2, which conflicts with LeRobot's numpy>=2).
 uv pip install --python "$PY" -e "$SRC[pi,libero]" \
-    "sentence-transformers>=6.1" piper-tts soundfile librosa h5py \
+    "sentence-transformers>=6.1" piper-tts soundfile librosa h5py "zarr>=2.12,<3" "termcolor>=2.0" \
     -c "$CONS"
 
 # ------------------------------------------------------------------- versions
@@ -163,7 +166,7 @@ EOF
 step "wait for downloads"
 wait "$DL_CKPT" || true
 wait "$DL_DATA" || true
-tail -2 "$LOGDIR/download-checkpoint.log" "$LOGDIR/download-dataset.log"
+tail -n 2 "$LOGDIR/download-checkpoint.log" "$LOGDIR/download-dataset.log"
 "$PY" - <<EOF
 from huggingface_hub import snapshot_download
 p = snapshot_download("$CKPT")

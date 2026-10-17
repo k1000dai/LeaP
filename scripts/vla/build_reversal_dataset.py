@@ -1,35 +1,46 @@
 #!/usr/bin/env python
-"""Build the offline reversal dataset for the VLA prior from the LIBERO-Spatial demos.
+"""Build the offline reversal dataset for the VLA prior from the LIBERO-Spatial demos (runs in the VLA venv).
 
 For every task: replay the stored sim states of each demo in LeRobot's LIBERO env (same renderer as
 evaluation) every ``--stride`` frames, render agentview + wrist at 256x256, build the 8-d state, take the
-50-step action chunk (last action repeated past the demo end, ``chunk_pad_mask`` marks real steps), run
-the frozen pi0.5 with the NEUTRAL prompt to get prefix features, and reverse the normalised chunk through
-the flow (K = ``--num-steps`` Euler steps) to the source noise.  Per demo: a sketch from frame 0 (saved as
-``episode{i}_sketch.png``) and the text / sketch / audio instruction embeddings.
+50-step action chunk (last action repeated past the demo end), run the frozen pi0.5 with the NEUTRAL prompt
+to get prefix features, and reverse the normalised chunk through the flow (K = ``--num-steps`` Euler steps)
+to the source noise.  Per demo a sketch of frame 0 is rendered; per task the instruction record is written.
 
-Output ``<out>/task_{i}.npz`` (N = number of sampled frames, D = number of demos):
+Embeddings are NOT computed here (google/embeddinggemma-2 needs a newer transformers than LeRobot pins):
+run ``scripts/vla/embed_vla_instructions.py --data <out>`` under the phase-2 venv afterwards.  It reads the
+artifacts this script leaves next to the npz:
 
-    feat [N, 4104] f32   state [N, 8] f32   noise [N, 50, 7] f32   chunk_pad_mask [N, 50] bool
-    demo_id [N] i64      t [N] i64          recon_err [N] f32 (NaN where not measured)
-    instr_text [D, 1, 768]  instr_sketch [D, 1, 768]  instr_audio [D, 1, 768]  (zeros when a modality is off)
-    instr_modalities [M] str  task_id (int)  task_language (str)  prompt (str)  num_steps (int)
+- ``task_{i}_instructions.json`` (texts, demo ids, sketch and audio file names; ``leap.vla.instructions``),
+- ``task_{i}_episode{d}_sketch.png`` per demo,
+- ``task_{i}_audio{v}.wav`` per text variant when ``--voice`` is given and piper imports here; otherwise the
+  embed script synthesizes them.
 
-plus ``<out>/manifest.json``.  Idempotent per task: an existing ``task_{i}.npz`` is skipped.
+Output ``<out>/task_{i}.npz`` (N = sampled frames; the embed script adds ``instr_text/sketch/audio [D, V, 768]``
+and ``instr_modalities``):
 
-Raw demo layout (LIBERO / robomimic hdf5): ``data/demo_{k}/states [T, S]`` (flattened MuJoCo state),
-``data/demo_{k}/actions [T, 7]``, ``data/demo_{k}/obs/{agentview_rgb, eye_in_hand_rgb, ee_pos, ee_ori,
-gripper_states, joint_states}``; images are re-rendered from ``states`` so ``obs`` is not read.  The file
-for task i is ``<raw>/<task name>_demo.hdf5`` (``suite.get_task_demonstration(i)``).
+    feat [N, 4104] f32   state [N, 8] f32   noise [N, 50, 7] f32
+    chunk_pad_mask [N, 50] bool  (True = padded step beyond the demo end, False = real demo step)
+    demo_id [N] i64 (hdf5 demo number)   t [N] i64 (demo frame)   recon_err [N] f32 (NaN where not measured)
+    task_id (int)  task_language (str)  prompt (str)  num_steps (int)
 
-Usage (remote GPU):
-    MUJOCO_GL=egl python scripts/vla/build_reversal_dataset.py --raw data/vla/raw/libero_spatial \\
-        --out data/vla/libero_spatial_reversal --checkpoint lerobot/pi05_libero_finetuned_v044 \\
-        --tasks 0-9 --stride 2 --num-steps 10 --batch-size 16 --device cuda \\
-        --voice data/voices/en_US-lessac-medium.onnx
+Rows are in ascending demo id, then ascending t.  ``<out>/manifest.json`` records the run parameters and
+``"chunk_pad_mask": "true_means_padded"``.  Idempotent per task: an existing ``task_{i}.npz`` is skipped.
+
+Raw demo layout (LIBERO / robomimic hdf5, verified on yifengzhu-hf/LIBERO-datasets libero_spatial):
+``data/demo_{k}/states [T, 92]`` (flattened MuJoCo state), ``data/demo_{k}/actions [T, 7]`` float64,
+``data/demo_{k}/obs/{agentview_rgb, eye_in_hand_rgb (128x128), ee_pos, ee_ori, ee_states, gripper_states,
+joint_states}``, ``robot_states [T, 9]``, ``rewards``, ``dones``; 50 demos of 79-134 steps per task.  Images
+are re-rendered from ``states`` so ``obs`` is not read.  The file for task i is
+``<raw>/<task name>_demo.hdf5`` (``suite.get_task_demonstration(i)``).
+
+Usage (remote GPU, VLA venv):
+    MUJOCO_GL=egl LIBERO_CONFIG_PATH=data/vla/libero_config python scripts/vla/build_reversal_dataset.py \\
+        --raw data/vla/raw/libero_spatial --out data/vla/libero_spatial_reversal \\
+        --checkpoint lerobot/pi05_libero_finetuned_v044 --tasks 0-9 --stride 2 --num-steps 10 \\
+        --batch-size 16 --device cuda
 """
 import argparse
-import json
 import os
 from pathlib import Path
 import re
@@ -47,6 +58,7 @@ CHUNK = 50
 ACTION_DIM = 7
 FEAT_DIM = 4104
 DEMO_RE = re.compile(r"^demo_(\d+)$")
+PAD_MASK_CONVENTION = "true_means_padded"
 
 
 # --- raw demos --------------------------------------------------------------------------------------------
@@ -83,7 +95,8 @@ def read_demo(h5, demo_id):
 def action_chunk(actions, t, horizon=CHUNK):
     """``actions[t : t + horizon]`` padded by repeating the last action; returns ``(chunk [H, 7], pad_mask [H] bool)``.
 
-    ``pad_mask[j]`` is True where ``t + j`` is a real demo step (the gripper command is held afterwards).
+    ``pad_mask[j]`` is True where ``t + j`` is beyond the demo end (a padded step holding the last action,
+    gripper included) and False for real demo steps.
     """
     actions = np.asarray(actions, dtype=np.float32)
     total = actions.shape[0]
@@ -93,9 +106,9 @@ def action_chunk(actions, t, horizon=CHUNK):
     valid = chunk.shape[0]
     if valid < horizon:
         chunk = np.concatenate([chunk, np.repeat(chunk[-1:], horizon - valid, axis=0)], axis=0)
-    mask = np.zeros(horizon, dtype=bool)
-    mask[:valid] = True
-    return chunk.astype(np.float32), mask
+    pad_mask = np.zeros(horizon, dtype=bool)
+    pad_mask[valid:] = True
+    return chunk.astype(np.float32), pad_mask
 
 
 def sample_frames(length, stride):
@@ -118,13 +131,13 @@ def parse_tasks(spec):
     return sorted(ids)
 
 
-def relative_l2(pred, target, mask):
-    """Relative L2 error over the valid chunk steps and the first ``ACTION_DIM`` dims, per sample [B]."""
+def relative_l2(pred, target, pad_mask):
+    """Relative L2 error over the real (non-padded) chunk steps and the first ``ACTION_DIM`` dims, per sample [B]."""
     pred = np.asarray(pred, dtype=np.float64)[:, :, :ACTION_DIM]
     target = np.asarray(target, dtype=np.float64)[:, :, :ACTION_DIM]
-    mask = np.asarray(mask, dtype=np.float64)[:, :, None]
-    num = np.sqrt((((pred - target) ** 2) * mask).sum(axis=(1, 2)))
-    den = np.sqrt(((target ** 2) * mask).sum(axis=(1, 2)))
+    valid = (~np.asarray(pad_mask, dtype=bool)).astype(np.float64)[:, :, None]
+    num = np.sqrt((((pred - target) ** 2) * valid).sum(axis=(1, 2)))
+    den = np.sqrt(((target ** 2) * valid).sum(axis=(1, 2)))
     return (num / np.maximum(den, 1e-8)).astype(np.float32)
 
 
@@ -138,9 +151,9 @@ def flow_api():
 class Reverser:
     """Batch observations through the frozen VLA: prefix features and reversed (noise) chunks.
 
-    ``images`` are ``{"image": uint8 [B, H, W, 3], "image2": ...}`` exactly as ``LiberoEnv`` returns ``pixels``
-    (raw render, not rotated); ``state`` is [B, 8]; ``actions7`` is [B, 50, 7] un-normalised; the prompt is
-    one string for the batch.
+    ``images`` is a list of ``{"image": uint8 [H, W, 3], "image2": ...}`` dicts exactly as ``LiberoEnv``
+    returns ``pixels`` (raw render; ``prepare_batches`` applies the 180-degree rotation), ``states`` a list of
+    8-d vectors, ``actions7`` [B, 50, 7] un-normalised; the prompt is one string for the whole batch.
     """
 
     def __init__(self, bundle, prompt, num_steps):
@@ -148,15 +161,19 @@ class Reverser:
         self.prompt = prompt
         self.num_steps = int(num_steps)
 
-    def run(self, images, state, actions7, pad_mask, measure_recon):
+    def run(self, images, states, actions7, pad_mask, measure_recon):
+        """-> ``(feat [B, 4104], noise [B, 50, 7], recon_err [B] with NaN where not measured)``."""
         api = flow_api()
-        batch = api.prepare_batches(self.bundle, images, state, self.prompt)
+        observations = [api.Observation(images=pixels, state=np.asarray(state, dtype=np.float32), prompt=self.prompt)
+                        for pixels, state in zip(images, states)]
+        batch = api.prepare_batches(self.bundle, observations)
         ctx = api.prefix_context(self.bundle, batch)
-        feat = _numpy(api.prefix_features(self.bundle, batch))
-        target = api.normalize_actions(self.bundle, actions7)
+        feat = _numpy(api.prefix_features(self.bundle, batch, ctx))
+        target = api.normalize_actions(self.bundle, np.asarray(actions7, dtype=np.float32))
         noise = api.reverse_actions(self.bundle, ctx, target, self.num_steps)
+        measure_recon = np.asarray(measure_recon, dtype=bool)
         recon = np.full(feat.shape[0], np.nan, dtype=np.float32)
-        if np.any(measure_recon):
+        if measure_recon.any():
             recon_pred = _numpy(api.forward_from_noise(self.bundle, ctx, noise, self.num_steps))
             errors = relative_l2(recon_pred, _numpy(target), pad_mask)
             recon[measure_recon] = errors[measure_recon]
@@ -172,33 +189,34 @@ def _numpy(value):
 # --- per-task build -----------------------------------------------------------------------------------------
 
 def collect_demo(env, states, actions, stride):
-    """Replay one demo at ``stride``: lists of images, states, chunks, masks, frame indices and frame-0 image."""
+    """Replay one demo at ``stride``.
+
+    Returns ``(frames, images, obs_states, chunks, pad_masks, frame0, layout)``: sampled frame indices, per-frame
+    ``pixels`` dicts, 8-d states, action chunks and pad masks, the policy-view agentview image of the first
+    frame and the object layout at that frame (for the sketch).
+    """
     frames = sample_frames(states.shape[0], stride)
-    images, obs_states, chunks, masks = [], [], [], []
-    frame0 = None
+    images, obs_states, chunks, pad_masks = [], [], [], []
+    frame0, layout = None, None
     for t in frames:
         raw_obs = S.replay_state(env, states[t])
         pixels = S.images_from_raw(raw_obs, env)
-        if t == frames[0]:
+        if frame0 is None:
             frame0 = S.policy_view(pixels["image"])
+            layout = S.scene_layout(env)
         images.append(pixels)
         obs_states.append(S.state_vector(raw_obs, env))
-        chunk, mask = action_chunk(actions, t)
+        chunk, pad_mask = action_chunk(actions, t)
         chunks.append(chunk)
-        masks.append(mask)
-    return frames, images, obs_states, chunks, masks, frame0
+        pad_masks.append(pad_mask)
+    return frames, images, obs_states, chunks, pad_masks, frame0, layout
 
 
-def stack_images(pixels_list):
-    keys = list(pixels_list[0].keys())
-    return {key: np.stack([p[key] for p in pixels_list]).astype(np.uint8) for key in keys}
-
-
-def build_task(args, suite, task_id, bundle, embedder, tts, rng):
-    """Build and write ``task_{task_id}.npz``; returns the manifest entry."""
+def build_task(args, suite, task_id, bundle, rng, tts=None):
+    """Build one task: ``task_{task_id}.npz``, the sketch PNGs, the instruction record (+ WAVs with ``tts``)."""
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    npz_path = out_dir / f"task_{task_id}.npz"
+    npz_path = I.task_npz_path(out_dir, task_id)
     if npz_path.exists():
         print(f"[task {task_id}] {npz_path} exists, skipping")
         return {"task_id": task_id, "path": str(npz_path), "skipped": True}
@@ -210,15 +228,10 @@ def build_task(args, suite, task_id, bundle, embedder, tts, rng):
     language = I.task_text(task.language)
     env = S.make_env(suite, task_id, S.NEUTRAL_PROMPT)
     env.reset(seed=0)
-    layout0 = S.scene_layout(env)  # only used to pick object names; per-demo layouts come from frame 0
     cam = S.agentview_camera(env)
     reverser = Reverser(bundle, S.NEUTRAL_PROMPT, args.num_steps)
-    modalities = [m for m in ("text", "sketch", "audio") if m not in args.skip_modalities]
-    if "audio" in modalities and tts is None:
-        raise ValueError("--voice is required for audio instructions (or pass --skip-modalities audio)")
 
     feats, states_out, noises, masks_out, demo_col, t_col, recon_col = [], [], [], [], [], [], []
-    instr = {m: [] for m in modalities}
     started = time.time()
     with h5py.File(path, "r") as h5:
         ids = demo_ids(h5)
@@ -226,32 +239,29 @@ def build_task(args, suite, task_id, bundle, embedder, tts, rng):
             ids = ids[:args.max_demos]
         for demo_index, demo_id in enumerate(ids):
             states, actions = read_demo(h5, demo_id)
-            frames, images, obs_states, chunks, masks, frame0 = collect_demo(env, states, actions, args.stride)
-            layout = S.scene_layout(env, names=S.SCENE_OBJECTS) if False else _frame0_layout(env, states[0])
-            sketch = I.build_sketch(frame0, cam, layout)
-            sketch.save(out_dir / f"task_{task_id}_episode{demo_id}_sketch.png")
-            if "text" in modalities:
-                instr["text"].append(I.embed_instruction(embedder, "text", text=language))
-            if "sketch" in modalities:
-                instr["sketch"].append(I.embed_instruction(embedder, "sketch", sketch=sketch))
-            if "audio" in modalities:
-                instr["audio"].append(I.embed_instruction(embedder, "audio", audio=I.build_audio(language, tts)))
+            frames, images, obs_states, chunks, pad_masks, frame0, layout = collect_demo(
+                env, states, actions, args.stride)
+            I.build_sketch(frame0, cam, layout).save(out_dir / I.sketch_file(task_id, demo_id))
             measure = rng.random(len(frames)) < args.recon_fraction
             for start in range(0, len(frames), args.batch_size):
                 stop = min(start + args.batch_size, len(frames))
                 feat, noise, recon = reverser.run(
-                    stack_images(images[start:stop]), np.stack(obs_states[start:stop]),
-                    np.stack(chunks[start:stop]), np.stack(masks[start:stop]), measure[start:stop])
+                    images[start:stop], obs_states[start:stop],
+                    np.stack(chunks[start:stop]), np.stack(pad_masks[start:stop]), measure[start:stop])
                 feats.append(np.asarray(feat, dtype=np.float32))
                 noises.append(np.asarray(noise, dtype=np.float32))
                 recon_col.append(np.asarray(recon, dtype=np.float32))
             states_out.extend(obs_states)
-            masks_out.extend(masks)
+            masks_out.extend(pad_masks)
             demo_col.extend([demo_id] * len(frames))
             t_col.extend(frames)
             print(f"[task {task_id}] demo {demo_id} ({demo_index + 1}/{len(ids)}): {len(frames)} frames of "
                   f"{states.shape[0]} steps, {time.time() - started:.0f}s", flush=True)
     env.close()
+    record = I.new_record(task_id, language, ids)
+    if tts is not None:
+        I.ensure_audio(out_dir, record, tts)
+    I.write_record(out_dir, record)
     arrays = {
         "feat": np.concatenate(feats, axis=0).astype(np.float32),
         "state": np.stack(states_out).astype(np.float32),
@@ -260,41 +270,28 @@ def build_task(args, suite, task_id, bundle, embedder, tts, rng):
         "demo_id": np.asarray(demo_col, dtype=np.int64),
         "t": np.asarray(t_col, dtype=np.int64),
         "recon_err": np.concatenate(recon_col, axis=0).astype(np.float32),
-        "instr_modalities": np.asarray(modalities),
         "task_id": np.int64(task_id),
         "task_language": np.str_(language),
         "prompt": np.str_(S.NEUTRAL_PROMPT),
         "num_steps": np.int64(args.num_steps),
     }
-    demos = len(ids)
-    for modality in ("text", "sketch", "audio"):
-        vectors = instr.get(modality)
-        arrays[f"instr_{modality}"] = (np.stack(vectors)[:, None, :].astype(np.float32) if vectors
-                                       else np.zeros((demos, 1, I.INSTR_DIM), dtype=np.float32))
-    check_arrays(arrays, demos)
-    np.savez(npz_path, **arrays)
+    check_arrays(arrays)
+    I.save_task_npz(npz_path, arrays)
     measured = arrays["recon_err"][np.isfinite(arrays["recon_err"])]
-    entry = {"task_id": task_id, "path": str(npz_path), "task_language": language, "demos": demos,
-             "frames": int(arrays["feat"].shape[0]), "stride": args.stride, "num_steps": args.num_steps,
-             "modalities": modalities, "recon_err_mean": float(measured.mean()) if measured.size else None,
-             "recon_err_count": int(measured.size), "seconds": round(time.time() - started, 1)}
+    entry = {"task_id": task_id, "path": str(npz_path), "task_language": language, "demos": len(ids),
+             "demo_ids": ids, "frames": int(arrays["feat"].shape[0]), "stride": args.stride,
+             "num_steps": args.num_steps, "recon_err_mean": float(measured.mean()) if measured.size else None,
+             "recon_err_count": int(measured.size), "audio_files": list(record["audio"]),
+             "seconds": round(time.time() - started, 1)}
     print(f"[task {task_id}] wrote {npz_path}: {entry}", flush=True)
     return entry
 
 
-def _frame0_layout(env, state0):
-    """Object layout at the demo's first frame (replays ``state0``)."""
-    S.replay_state(env, state0)
-    return S.scene_layout(env)
-
-
-def check_arrays(arrays, demos):
-    """Shape/dtype checks of the npz contents (shared with the tests)."""
+def check_arrays(arrays):
+    """Shape checks of the reversal arrays."""
     n = arrays["feat"].shape[0]
     expected = {"feat": (n, FEAT_DIM), "state": (n, S.STATE_DIM), "noise": (n, CHUNK, ACTION_DIM),
-                "chunk_pad_mask": (n, CHUNK), "demo_id": (n,), "t": (n,), "recon_err": (n,),
-                "instr_text": (demos, 1, I.INSTR_DIM), "instr_sketch": (demos, 1, I.INSTR_DIM),
-                "instr_audio": (demos, 1, I.INSTR_DIM)}
+                "chunk_pad_mask": (n, CHUNK), "demo_id": (n,), "t": (n,), "recon_err": (n,)}
     for key, shape in expected.items():
         if tuple(arrays[key].shape) != shape:
             raise ValueError(f"{key}: expected shape {shape}, got {arrays[key].shape}")
@@ -302,30 +299,23 @@ def check_arrays(arrays, demos):
         raise ValueError("no frames were collected")
 
 
-def load_task(path):
-    """Read a ``task_{i}.npz`` back as a dict of arrays (scalars unwrapped)."""
-    with np.load(path, allow_pickle=False) as data:
-        out = {key: data[key] for key in data.files}
-    out["task_id"] = int(out["task_id"])
-    out["task_language"] = str(out["task_language"])
-    out["prompt"] = str(out["prompt"])
-    out["num_steps"] = int(out["num_steps"])
-    return out
+def manifest_defaults(args):
+    return {"checkpoint": args.checkpoint, "prompt": S.NEUTRAL_PROMPT, "stride": args.stride,
+            "num_steps": args.num_steps, "suite": args.suite, "chunk_pad_mask": PAD_MASK_CONVENTION}
 
 
-def write_manifest(out_dir, entries, args):
-    path = Path(out_dir) / "manifest.json"
-    manifest = {"tasks": {}, "checkpoint": args.checkpoint, "prompt": S.NEUTRAL_PROMPT, "stride": args.stride,
-                "num_steps": args.num_steps, "suite": args.suite}
-    if path.exists():
-        with open(path) as handle:
-            manifest.update(json.load(handle))
-    for entry in entries:
-        if not entry.get("skipped"):
-            manifest["tasks"][str(entry["task_id"])] = entry
-    with open(path, "w") as handle:
-        json.dump(manifest, handle, indent=2)
-    return path
+def make_tts(voice):
+    """``PiperTTS`` for ``voice`` when piper imports and the file exists, else None (audio left to the embed script)."""
+    if not voice:
+        return None
+    try:
+        from leap.steer.tts import PiperTTS
+        tts = PiperTTS(voice)
+        tts._load()
+    except Exception as error:  # noqa: BLE001 - piper may be absent in the VLA venv
+        print(f"TTS unavailable ({error!r}); audio will be synthesized by embed_vla_instructions.py")
+        return None
+    return tts
 
 
 # --- main -----------------------------------------------------------------------------------------------------
@@ -333,7 +323,7 @@ def write_manifest(out_dir, entries, args):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--raw", required=True, help="directory with <task name>_demo.hdf5 files")
-    parser.add_argument("--out", required=True, help="output directory for task_{i}.npz and manifest.json")
+    parser.add_argument("--out", required=True, help="output directory for task_{i}.npz, artifacts and manifest.json")
     parser.add_argument("--checkpoint", default="lerobot/pi05_libero_finetuned_v044")
     parser.add_argument("--suite", default="libero_spatial")
     parser.add_argument("--tasks", default="0-9", help="task ids, e.g. 0-9 or 0,3")
@@ -341,10 +331,7 @@ def parse_args(argv=None):
     parser.add_argument("--num-steps", type=int, default=10, help="Euler steps for reversal (and reconstruction)")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--embedder-device", default=None, help="defaults to --device")
-    parser.add_argument("--embedder-model", default="google/embeddinggemma-2")
-    parser.add_argument("--voice", default=None, help="Piper voice .onnx for audio instructions")
-    parser.add_argument("--skip-modalities", nargs="*", default=[], choices=["text", "sketch", "audio"])
+    parser.add_argument("--voice", default=None, help="optional Piper voice .onnx: write the audio WAVs here too")
     parser.add_argument("--max-demos", type=int, default=None)
     parser.add_argument("--recon-fraction", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
@@ -354,24 +341,24 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     os.environ.setdefault("MUJOCO_GL", "egl")
-    suite = S.load_suite(args.suite)
+    # hf-libero prompts with input() on first import unless its config.yaml exists; the remote setup
+    # writes one under data/vla/libero_config (scripts/vla/remote_setup_vla.sh), so point there by default.
+    libero_config = Path(__file__).resolve().parents[2] / "data" / "vla" / "libero_config"
+    if "LIBERO_CONFIG_PATH" not in os.environ and libero_config.is_dir():
+        os.environ["LIBERO_CONFIG_PATH"] = str(libero_config)
     tasks = parse_tasks(args.tasks)
-    pending = [t for t in tasks if not (Path(args.out) / f"task_{t}.npz").exists()]
+    pending = [t for t in tasks if not I.task_npz_path(args.out, t).exists()]
     entries = []
     if not pending:
         print("all requested tasks exist; nothing to do")
     else:
+        suite = S.load_suite(args.suite)
         bundle = flow_api().load_pi05(args.checkpoint, args.device)
-        from leap.steer.embedder import InstructionEmbedder
-        embedder = InstructionEmbedder(args.embedder_model, device=args.embedder_device or args.device)
-        tts = None
-        if args.voice and "audio" not in args.skip_modalities:
-            from leap.steer.tts import PiperTTS
-            tts = PiperTTS(args.voice)
+        tts = make_tts(args.voice)
         rng = np.random.default_rng(args.seed)
         for task_id in tasks:
-            entries.append(build_task(args, suite, task_id, bundle, embedder, tts, rng))
-    path = write_manifest(args.out, entries, args)
+            entries.append(build_task(args, suite, task_id, bundle, rng, tts))
+    path = I.update_manifest(args.out, entries, manifest_defaults(args))
     print(f"manifest: {path}")
 
 

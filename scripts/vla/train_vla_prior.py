@@ -74,8 +74,28 @@ def task_number(path):
     return int(path.stem.split("_")[-1])
 
 
+def padded_mask(mask, name):
+    """Normalise a stored chunk mask to the prior's convention (True = padded); returns (mask, stored convention).
+
+    build_reversal_dataset.py stores True for real demo steps.  Chunk step 0 is always a real step, so column 0
+    tells the two conventions apart exactly: all True -> the file marks real steps, all False -> it marks padding.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 2:
+        raise ValueError(f"{name}: chunk_pad_mask must be [N, H], got {mask.shape}")
+    if mask[:, 0].all():
+        return ~mask, "valid"
+    if not mask[:, 0].any():
+        return mask, "padded"
+    raise ValueError(f"{name}: chunk_pad_mask column 0 is mixed; cannot tell whether True marks padding or real steps")
+
+
 def load_tasks(data_dir, modalities):
-    """One dict per task_*.npz with the arrays used here; shapes are validated against each other."""
+    """One dict per task_*.npz with the arrays used here; shapes are validated against each other.
+
+    ``demo_row`` maps every sample to its row in the instruction tables: the builder stores the hdf5 demo
+    number in ``demo_id`` and the instruction rows in ascending demo order, so rows are the rank of the id.
+    """
     paths = sorted(Path(data_dir).glob("task_*.npz"), key=task_number)
     if not paths:
         raise FileNotFoundError(f"no task_*.npz under {data_dir}")
@@ -85,23 +105,29 @@ def load_tasks(data_dir, modalities):
             task = {"path": str(path), "task_id": int(npz["task_id"]), "task_language": str(npz["task_language"]),
                     "feat": np.asarray(npz["feat"], dtype=np.float32),
                     "noise": np.asarray(npz["noise"], dtype=np.float32),
-                    "pad": np.asarray(npz["chunk_pad_mask"], dtype=bool),
                     "demo_id": np.asarray(npz["demo_id"], dtype=np.int64),
                     "recon_err": np.asarray(npz["recon_err"], dtype=np.float32) if "recon_err" in npz else None}
+            task["pad"], task["mask_convention"] = padded_mask(npz["chunk_pad_mask"], path)
+            built = [str(m) for m in npz["instr_modalities"]] if "instr_modalities" in npz else None
             for modality in modalities:
                 key = f"instr_{modality}"
-                if key not in npz:
-                    raise KeyError(f"{path} has no {key}")
+                if key not in npz or (built is not None and modality not in built) or not np.any(npz[key]):
+                    raise SystemExit(f"{path} has no {modality} instruction embeddings (instr_modalities: {built}); run "
+                                     f"scripts/vla/embed_vla_instructions.py --data {data_dir} --modalities {modality} "
+                                     f"under the embedder venv first, or train with --instr-mode none")
                 task[key] = np.asarray(npz[key], dtype=np.float32)
         n = task["feat"].shape[0]
         if task["feat"].ndim != 2 or task["noise"].shape[:1] != (n,) or task["noise"].ndim != 3:
             raise ValueError(f"{path}: feat {task['feat'].shape} / noise {task['noise'].shape} mismatch")
         if task["pad"].shape != task["noise"].shape[:2] or task["demo_id"].shape != (n,):
             raise ValueError(f"{path}: chunk_pad_mask {task['pad'].shape} / demo_id {task['demo_id'].shape} mismatch")
+        unique = np.unique(task["demo_id"])
+        task["demo_row"] = np.searchsorted(unique, task["demo_id"])
+        task["demos"] = int(len(unique))
         for modality in modalities:
             instr = task[f"instr_{modality}"]
-            if instr.ndim != 3 or instr.shape[0] <= task["demo_id"].max():
-                raise ValueError(f"{path}: instr_{modality} {instr.shape} does not index every demo_id")
+            if instr.ndim != 3 or instr.shape[0] != task["demos"]:
+                raise ValueError(f"{path}: instr_{modality} {instr.shape} does not match {task['demos']} demos")
         tasks.append(task)
     return tasks
 
@@ -129,8 +155,8 @@ def stack_dataset(tasks, val_masks, modalities):
             "pad": np.concatenate([t["pad"] for t in tasks]),
             "is_val": np.concatenate(val_masks),
             "task_index": np.concatenate([np.full(len(t["demo_id"]), i) for i, t in enumerate(tasks)])}
-    offsets = np.cumsum([0] + [int(t["demo_id"].max()) + 1 for t in tasks])
-    data["demo_row"] = np.concatenate([t["demo_id"] + offsets[i] for i, t in enumerate(tasks)])
+    offsets = np.cumsum([0] + [t["demos"] for t in tasks])
+    data["demo_row"] = np.concatenate([t["demo_row"] + offsets[i] for i, t in enumerate(tasks)])
     data["instr"], data["instr_count"] = {}, {}
     for modality in modalities:
         tables = [t[f"instr_{modality}"] for t in tasks]
@@ -267,7 +293,8 @@ def main(argv=None):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     references = reference_nlls(tensors, train_idx, val_idx)
     run = {"args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-           "tasks": [{"task_id": t["task_id"], "task_language": t["task_language"], "path": t["path"]} for t in tasks],
+           "tasks": [{"task_id": t["task_id"], "task_language": t["task_language"], "path": t["path"],
+                      "demos": t["demos"], "mask_convention": t["mask_convention"]} for t in tasks],
            "split": split, "n_train": int(len(train_idx)), "n_val": int(len(val_idx)),
            "model": model.config(), "parameters": sum(p.numel() for p in model.parameters()),
            "references": references, "recon_err": recon_summary(tasks),
