@@ -327,6 +327,90 @@ more init states per task (20 per task gives ±10 points per cell); a prior
 over several chunks or over the VLA's prefix KV instead of x0 for the
 layouts where x0 does not reach (3, 6).
 
+## Phase 3c: is the weak steering a label problem or a fit problem?
+
+Diagnosis on the counterfactual dataset (`scripts/vla/probe_cf_labels.py`,
+CPU) and with an offline forward score that needs no simulator
+(`scripts/vla/score_prior_forward.py`, GPU). Both rollouts of an init state
+start from the same observation, so at the first query (q0) the two noise
+labels differ only through the bowl: δ = noise(bowl 2) − noise(bowl 1).
+
+**The labels carry the bowl.** Per layout (tasks 1, 3, 5, 6, 7, 9; 15–20
+matched states), δ is 1.7–2.2 σ per element (d′ 1.7–2.8; σ = within-bowl std
+across states), along one consistent direction per layout (pairwise cosine
+of δ across states 0.59–0.67, shared fraction ≈ 0.8) and no direction shared
+across layouts (cosine of the layouts' mean directions −0.04). The shift is
+spread over all 50 chunk steps and all action dims (xyz largest). A
+leave-init-state-out probe reads the bowl from the q0 label at 97–100 % per
+task (chance 50 %); pooled over tasks with one direction it drops to 76–84 %,
+i.e. the prior has to take the direction from the observation features.
+
+**The prior learns the direction but shrinks it.** For `prior-cf-concat`
+(best.pt, text; sketch/audio within ±0.1) Δμ = μ(e_bowl2) − μ(e_bowl1) at q0:
+
+| task | cos(Δμ, δ) | proj = fraction of δ reproduced, gain 1 / 2 / 3 | proj train / held-out states | μ on the bowl-2 side given e_bowl2 / e_bowl1 |
+|---|---|---|---|---|
+| 1 | 0.72 | 0.32 / 0.64 / 0.96 | 0.33 / 0.29 | 87 % / 0 % |
+| 3 | 0.74 | 0.35 / 0.71 / 1.06 | 0.36 / 0.34 | 100 % / 0 % |
+| 5 | 0.79 | 0.47 / 0.94 / 1.41 | 0.47 / 0.47 | 100 % / 0 % |
+| 6 | 0.79 | 0.52 / 1.04 / 1.56 | 0.52 / 0.55 | 94 % / 0 % |
+| 7 | 0.77 | 0.48 / 0.97 / 1.45 | 0.48 / 0.48 | 100 % / 5 % |
+| 9 | 0.76 | 0.45 / 0.90 / 1.35 | 0.46 / 0.43 | 85 % / 0 % |
+
+The shortfall (30–50 % of δ at gain 1) is the same on training and held-out
+states, so it is an under-fit of the instruction response, not a data-size
+or generalisation problem. The final checkpoint (step 12 500, rejected by
+the validation NLL) reproduces 48–64 % with held-out ≈ train: early stopping
+on the NLL (best at step 1 500) threw away part of the instruction channel.
+The uninstructed `prior-cf-none` reproduces 2–13 % at q0 (render jitter).
+The standardised embeddings of the two bowls are much closer for sketches
+(cos 0.83–0.94) than for text (0.23–0.37), yet the reproduced shift is the
+same, so the input signal is not the bottleneck.
+
+**Offline forward score** (106 init states of 0–19 with both rollouts
+successful; x0 → 10 Euler steps under the neutral prompt → the first chunk
+is classified by the nearer of the two recorded first chunks; % bowl 2;
+"sim" = the phase-3b bowl-2 choice on the held-out states 20–39 of the same
+six tasks):
+
+| x0 | 1 | 3 | 5 | 6 | 7 | 9 | overall | sim |
+|---|---|---|---|---|---|---|---|---|
+| stored bowl-1 label (sanity) | 0 | 0 | 0 | 0 | 47 | 0 | 8.5 | |
+| stored bowl-2 label (sanity) | 87 | 94 | 100 | 47 | 95 | 65 | 81.1 | |
+| Gaussian | 13 | 11 | 0 | 0 | 79 | 15 | 20.8 | 18.3 |
+| prior-cf-none | 15 | 17 | 0 | 0 | 80 | 19 | 22.9 | 23.3 |
+| concat + text, bowl-1 instr, gain 1 | 0 | 7 | 0 | 0 | 61 | 10 | 13.9 | ≤ 16.7 |
+| concat + text, bowl-2 instr, gain 1 | 30 | 44 | 29 | 1 | 91 | 24 | 37.5 | 36.7 |
+| concat + text, bowl-1 / bowl-2 instr, gain 2 | 0 / 70 | 3 / 93 | 0 / 79 | 0 / 90 | 5 / 99 | 5 / 68 | 2.4 / 83.3 | see below |
+| concat + text, bowl-1 / bowl-2 instr, gain 3 | 0 / 80 | 0 / 100 | 0 / 100 | 0 / 100 | 0 / 100 | 0 / 100 | 0.0 / 97.2 | see below |
+| concat + sketch, gain 1 / 2 (bowl-2 instr) | 27 / 60 | 35 / 76 | 22 / 65 | 0 / 84 | 95 / 95 | 20 / 59 | 34.0 / 73.3 | 32.5 / – |
+| concat + audio, gain 1 / 2 (bowl-2 instr) | 33 / 72 | 47 / 97 | 40 / 94 | 6 / 91 | 92 / 99 | 24 / 75 | 41.0 / 88.2 | 35.8 / – |
+
+The score reproduces the simulator levels of every measured condition
+(Gaussian 20.8 vs 18.3, uninstructed prior 22.9 vs 23.3, text 37.5 vs 36.7
+and 13.9 vs ≤ 16.7), so it is the screening metric for new priors
+(`P(bowl 2 | e_bowl2) − P(bowl 2 | e_bowl1)`; ≈ 10 s per state after the
+model load). Its prediction: an instruction gain of 2 restores the full
+label shift (proj ≈ 1) and should roughly double the bowl-2 choice without a
+bowl-1 regression; gain 3 saturates. The bowl-2 labels of tasks 6 and 9
+regenerate bowl 2 only 47 / 65 % of the time (and task 7's bowl-1 label
+gives bowl 2 in 47 %): those labels sit near the basin boundary of the
+neutral flow, consistent with the simulator's 0 % on task 6 for every prior
+cell.
+
+Caveats: `t` in the dataset is the env step (0, 2, 4, …), not the query
+index; the two rollouts of an init state have identical state but 8–15 % of
+pixels differ slightly (render jitter), which gives the uninstructed prior
+an apparent 6 % shift at q0; stored labels regenerate their own chunk with a
+relative error of 0.42 (fresh Gaussian padding dims, bf16) and are still
+classified correctly 81 % (bowl 2) / 91.5 % (bowl 1).
+
+### Inference gain and retrained priors (phase 3c results)
+
+(pending — Stage A: `--instr-gain` and σ-scale 0 on the existing prior;
+Stage B: training variants screened with the offline score and confirmed in
+the simulator on tasks 1, 3, 5, 6, 7, 9, init states 20–39.)
+
 ## Notes
 
 - LeRobot's LIBERO env default render is 360²; we pass 256² explicitly (the
