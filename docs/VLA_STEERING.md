@@ -209,6 +209,45 @@ successful episodes only, every recorded query): on the pilot the
 reconstruction error of the VLA's own chunks is 0.13–0.21 (mean per (task,
 bowl); demonstration chunks: 0.275), recovered-noise std 1.2–1.6.
 
+## Phase 3b: prior on the counterfactual data
+
+`scripts/vla/run_vla_counterfactual.sh`. Dataset: 17 files (bowl 1 of every
+task, bowl 2 of the seven tasks with a successful rollout), successful
+episodes only, every recorded query; the prior is trained as before
+(`prior-cf-concat`, `prior-cf-none`; 12.5 k steps, best checkpoint).
+
+| | prior-cf-concat | prior-cf-none |
+|---|---|---|
+| best validation NLL (step) | 1.488 (1500) | 1.507 (1000) |
+| final validation NLL | 1.62 | 1.72 |
+| N(0, I) / empirical Gaussian reference | 2.02 / 1.79 | |
+
+Offline instruction sensitivity of `prior-cf-concat` (`scripts/vla/probe_cf_prior.py`;
+held-out rows, the row's own instruction vs the other bowl's instruction for
+the same observation; Δ = NLL(swapped) − NLL(own), "own <" = fraction of rows
+the own instruction scores better, |Δμ|/σ = mean shift of μ in units of the
+predicted σ):
+
+| task | bowl | rows | text Δ | own < | ǀΔμǀ/σ | sketch Δ | own < | ǀΔμǀ/σ |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 1 / 2 | 103 / 108 | +0.19 / +0.28 | 92 / 94 % | 0.44 / 0.31 | +0.12 / +0.25 | 79 / 93 % | 0.38 / 0.25 |
+| 3 | 1 / 2 | 84 / 117 | +0.17 / +0.30 | 88 / 100 % | 0.39 / 0.33 | +0.13 / +0.27 | 87 / 100 % | 0.36 / 0.29 |
+| 5 | 1 / 2 | 87 / 87 | +0.25 / +0.69 | 79 / 100 % | 0.54 / 0.54 | +0.25 / +0.76 | 83 / 100 % | 0.54 / 0.52 |
+| 6 | 1 / 2 | 124 / 122 | +0.11 / +0.36 | 77 / 97 % | 0.33 / 0.41 | +0.11 / +0.26 | 79 / 94 % | 0.30 / 0.35 |
+| 7 | 1 / 2 | 116 / 117 | +0.19 / +0.21 | 95 / 99 % | 0.35 / 0.32 | +0.11 / +0.19 | 88 / 99 % | 0.27 / 0.28 |
+| 9 | 1 / 2 | 118 / 117 | +0.21 / +0.23 | 93 / 99 % | 0.29 / 0.36 | +0.19 / +0.19 | 90 / 100 % | 0.27 / 0.30 |
+
+Unlike the demonstration-trained prior, this one encodes the bowl: swapping
+the instruction raises the held-out NLL by 0.1–0.7 nats, the own instruction
+wins on 77–100 % of rows, and μ moves by 0.3–0.5 σ. Whether a shift of that
+size survives the VLA's contractive flow at inference is what the evaluation
+measures (held-out init states 20–39; results below when the campaign
+finishes).
+
+### Results (phase 3b)
+
+(pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla_cf`)
+
 ## Notes
 
 - LeRobot's LIBERO env default render is 360²; we pass 256² explicitly (the
