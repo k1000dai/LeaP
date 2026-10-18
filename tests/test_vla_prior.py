@@ -119,6 +119,30 @@ class VLAPriorTest(unittest.TestCase):
         half = prior.sample(mu, log_var, sigma_scale=0.5, generator=torch.Generator().manual_seed(5))
         torch.testing.assert_close(half - mu, 0.5 * (first - mu))
 
+    def test_steered_gain(self):
+        prior = make_prior().eval()   # dropout off: steered() must reproduce the plain forward
+        prior.set_stats(np.zeros(SMALL["feat_dim"]), np.ones(SMALL["feat_dim"]),
+                        instr_mean=np.full(SMALL["instr_dim"], 0.5), instr_std=np.full(SMALL["instr_dim"], 2.0))
+        mu, log_var = prior(self.feat, self.instr)
+        # gain 1 is the plain forward; gain 0 is the response to the mean instruction (a standardised zero).
+        mu1, lv1 = prior.steered(self.feat, self.instr, gain=1.0)
+        torch.testing.assert_close(mu1, mu)
+        torch.testing.assert_close(lv1, log_var)
+        anchor = torch.full_like(self.instr, 0.5)
+        mu0, _ = prior.steered(self.feat, self.instr, gain=0.0)
+        torch.testing.assert_close(mu0, prior(self.feat, anchor)[0])
+        self.assertFalse(torch.allclose(mu0, mu))
+        # gain 2 extrapolates linearly along the instruction's shift; log_var stays the instruction's own.
+        mu2, lv2 = prior.steered(self.feat, self.instr, gain=2.0)
+        torch.testing.assert_close(mu2, mu0 + 2.0 * (mu - mu0))
+        torch.testing.assert_close(lv2, log_var)
+        # instr_mode none ignores the gain.
+        none = make_prior(instr_mode="none").eval()
+        mu_n, lv_n = none(self.feat)
+        mu_g, lv_g = none.steered(self.feat, None, gain=3.0)
+        torch.testing.assert_close(mu_g, mu_n)
+        torch.testing.assert_close(lv_g, lv_n)
+
     def test_stats_standardisation(self):
         prior = make_prior()
         feat_mean, feat_std = np.full(16, 2.0, dtype=np.float32), np.full(16, 4.0, dtype=np.float32)

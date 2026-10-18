@@ -285,6 +285,25 @@ class EvalLoopTest(unittest.TestCase):
         for a, b in zip(first, second):
             torch.testing.assert_close(a, b)
 
+    def test_instr_gain_changes_mu_and_is_logged(self):
+        prior = save_prior(Path(self.temp.name) / "concat.pt", "concat")
+        common = ("--condition", "neutral-prior", "--instr-modality", "text", "--prior", str(prior), "--sigma-scale", "0")
+        lines, summary = self.run_main(*common, episodes=1)
+        plain = [n[0, :, :ACTION_DIM].clone() for n in self.record["noises"]]
+        self.assertEqual(lines[0]["instr_gain"], 1.0)
+        self.assertEqual(summary["instr_gain"], 1.0)
+        self.record["noises"].clear()
+        (self.out / "episodes.jsonl").unlink()
+        lines, summary = self.run_main(*common, "--instr-gain", "2.0", episodes=1)
+        amplified = [n[0, :, :ACTION_DIM] for n in self.record["noises"]]
+        self.assertEqual(len(amplified), len(plain))
+        self.assertTrue(any(not torch.allclose(a, b) for a, b in zip(amplified, plain)))
+        self.assertEqual(lines[0]["instr_gain"], 2.0)
+        self.assertEqual(summary["instr_gain"], 2.0)
+        with self.assertRaises(SystemExit):   # a gain needs an instruction
+            self.run_main("--condition", "neutral-prior", "--prior", str(save_prior(Path(self.temp.name) / "n.pt", "none")),
+                          "--instr-gain", "2.0", episodes=1)
+
     def test_prior_modality_mismatch(self):
         prior = save_prior(Path(self.temp.name) / "none.pt", "none")
         with self.assertRaises(SystemExit):

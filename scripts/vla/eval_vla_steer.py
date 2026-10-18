@@ -224,6 +224,9 @@ def parse_args(argv=None):
     parser.add_argument("--instr-modality", choices=MODALITIES, default="none")
     parser.add_argument("--prior", type=Path, help="VLAPrior checkpoint (neutral-prior only)")
     parser.add_argument("--sigma-scale", type=float, default=1.0, help="x0 = mu + sigma_scale * sigma * eps")
+    parser.add_argument("--instr-gain", type=float, default=1.0,
+                        help="Scale of the instruction's shift of mu about the prior's mean-instruction response "
+                             "(VLAPrior.steered; 1 = plain forward, 0 = no instruction, >1 amplifies)")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--num-steps", type=int, default=10, help="Flow integration steps")
     parser.add_argument("--n-action-steps", type=int, default=10, help="Actions executed per policy call")
@@ -255,6 +258,8 @@ def parse_args(argv=None):
         parser.error(f"--condition {args.condition} takes no instruction (--instr-modality none)")
     if args.sigma_scale < 0:
         parser.error("sigma-scale must be >= 0")
+    if args.instr_gain != 1.0 and args.instr_modality == "none":
+        parser.error("--instr-gain needs an instruction modality")
     if args.embedder_device is None:
         args.embedder_device = args.device
     try:
@@ -306,6 +311,7 @@ def summarize(records):
 
 def write_summary(out, args, records):
     summary = {"condition": args.condition, "modality": args.instr_modality, "sigma_scale": args.sigma_scale,
+               "instr_gain": args.instr_gain,
                "seed": args.seed, "suite": args.suite, "checkpoint": args.checkpoint, "target_bowl": args.target_bowl,
                "prior": None if args.prior is None else str(args.prior), "num_steps": args.num_steps,
                "n_action_steps": args.n_action_steps, "tasks_requested": args.task_ids,
@@ -433,7 +439,7 @@ class Evaluator:
         noise, diagnostics = None, None
         if self.prior is not None:
             feat = self.flow.prefix_features(self.bundle, batch, ctx).float()
-            mu, log_var = self.prior(feat, instr)
+            mu, log_var = self.prior.steered(feat, instr, self.args.instr_gain)
             noise = self.flow.pad_noise(self.prior.sample(mu, log_var, self.args.sigma_scale))
             diagnostics = (float(mu.abs().mean()), float(self.torch.exp(0.5 * log_var).mean()))
         actions = self.flow.sample_actions_with_noise(self.bundle, ctx, noise, num_steps=self.args.num_steps)
@@ -472,7 +478,8 @@ class Evaluator:
             choice = self.counterfactual.intended_choice(choice, self.args.target_bowl)
         record = {"task_id": task_id, "task_language": task_language, "episode": episode, "success": success,
                   "bowl_choice": choice, "steps": steps, "condition": self.args.condition,
-                  "modality": self.args.instr_modality, "sigma_scale": self.args.sigma_scale, "seed": seed,
+                  "modality": self.args.instr_modality, "sigma_scale": self.args.sigma_scale,
+                  "instr_gain": self.args.instr_gain, "seed": seed,
                   "prompt": prompt, "elapsed_s": round(time.time() - started, 2),
                   "target_bowl": self.args.target_bowl, "target_language": language, "libero_success": libero_success}
         if diagnostics:

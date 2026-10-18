@@ -7,6 +7,7 @@ and an optional steering embedding (768-d text / sketch / audio from the shared 
 
     (mu, log sigma^2) = VLAPrior(feat, instr)        # each [B, horizon, action_dim]
     x0 = mu + sigma . eps,  eps ~ N(0, I)            # sample(); sigma_scale 0 -> mu
+    mu = mu(mean instr) + gain . (mu(instr) - mu(mean instr))   # steered(); gain 1 = plain forward
     x0_padded = pad_noise(x0)                        # dims >= action_dim ~ N(0, I), see pi05_flow
 
 Inputs are standardised with per-dimension statistics of the training set, stored as
@@ -146,6 +147,22 @@ class VLAPrior(nn.Module):
         if mse_weight:
             loss = loss + mse_weight * masked_mse(mu, noise, pad_mask)
         return loss
+
+    @torch.no_grad()
+    def steered(self, feat, instr=None, gain=1.0):
+        """(mu, log_var) with the instruction's shift of mu scaled by ``gain`` (1 = plain forward).
+
+        The anchor is the prior's response to the *average* instruction, i.e. the training mean of the
+        embedding (a standardised zero): mu = mu(mean) + gain . (mu(instr) - mu(mean)).  gain 0 removes
+        the instruction, gain > 1 amplifies it (the source-prior analogue of guidance); log_var is the
+        instruction's own.  instr_mode "none" ignores ``gain``.
+        """
+        mu, log_var = self(feat, instr)
+        if self.instr_mode != "concat" or float(gain) == 1.0:
+            return mu, log_var
+        anchor = self.instr_mean.unsqueeze(0).expand(feat.shape[0], -1).to(feat.dtype)
+        mu_anchor, _ = self(feat, anchor)
+        return mu_anchor + float(gain) * (mu - mu_anchor), log_var
 
     @torch.no_grad()
     def sample(self, mu, log_var, sigma_scale=1.0, generator=None):
