@@ -222,6 +222,19 @@ class EvalLoopTest(unittest.TestCase):
         self.assertEqual(summary["condition"], "neutral-gauss")
         self.assertEqual(summary["modality"], "none")
 
+    def test_first_episode_offsets_init_states(self):
+        lines, summary = self.run_main("--condition", "neutral-gauss", "--first-episode", "20", tasks="0,1")
+        self.assertEqual([(l["task_id"], l["episode"]) for l in lines], [(0, 20), (0, 21), (1, 20), (1, 21)])
+        self.assertEqual([r[0] for r in self.record["envs"][0].resets], [20, 21])
+        self.assertEqual(summary["first_episode"], 20)
+        self.assertEqual(summary["overall"]["episodes"], 4)
+        # A rerun with the default window runs the states 0-1 and summarises only those.
+        self.record["envs"].clear()
+        lines, summary = self.run_main("--condition", "neutral-gauss", tasks="0,1")
+        self.assertEqual([r[0] for r in self.record["envs"][0].resets], [0, 1])
+        self.assertEqual(len(lines), 8)
+        self.assertEqual(summary["overall"]["episodes"], 4)
+
     def test_full_prompt_uses_task_language(self):
         lines, _ = self.run_main("--condition", "full-prompt", episodes=1)
         self.assertEqual(self.record["prompt_override"], [None])

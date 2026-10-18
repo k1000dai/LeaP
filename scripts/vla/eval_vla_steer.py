@@ -217,6 +217,9 @@ def parse_args(argv=None):
     parser.add_argument("--suite", default="libero_spatial")
     parser.add_argument("--tasks", default="0-9", help='Task ids: "0-9", "0,3,5" or "2"')
     parser.add_argument("--episodes", type=int, default=20, help="Episodes per task (episode e uses init state e)")
+    parser.add_argument("--first-episode", type=int, default=0,
+                        help="First init state: episodes --first-episode .. --first-episode + --episodes - 1 "
+                             "(e.g. 20 to hold out the states 0-19 used by the counterfactual rollouts)")
     parser.add_argument("--condition", choices=CONDITIONS)
     parser.add_argument("--instr-modality", choices=MODALITIES, default="none")
     parser.add_argument("--prior", type=Path, help="VLAPrior checkpoint (neutral-prior only)")
@@ -306,7 +309,7 @@ def write_summary(out, args, records):
                "seed": args.seed, "suite": args.suite, "checkpoint": args.checkpoint, "target_bowl": args.target_bowl,
                "prior": None if args.prior is None else str(args.prior), "num_steps": args.num_steps,
                "n_action_steps": args.n_action_steps, "tasks_requested": args.task_ids,
-               "episodes_per_task": args.episodes}
+               "episodes_per_task": args.episodes, "first_episode": args.first_episode}
     summary.update(summarize(records))
     (Path(out) / SUMMARY_NAME).write_text(json.dumps(summary, indent=2))
     return summary
@@ -513,13 +516,14 @@ def main(argv=None):
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
     records = read_log(out / LOG_NAME)
-    pending = {task_id: [e for e in range(args.episodes) if (task_id, e) not in records] for task_id in args.task_ids}
+    episode_ids = range(args.first_episode, args.first_episode + args.episodes)
+    pending = {task_id: [e for e in episode_ids if (task_id, e) not in records] for task_id in args.task_ids}
     pending = {task_id: episodes for task_id, episodes in pending.items() if episodes}
     print(f"{args.condition}/{args.instr_modality} sigma {args.sigma_scale}: {len(records)} episodes logged, "
           f"{sum(len(e) for e in pending.values())} to run -> {out}", flush=True)
     if pending:
         records = run_pending(args, out, records, pending)
-    requested = {key: records[key] for key in records if key[0] in args.task_ids and key[1] < args.episodes}
+    requested = {key: records[key] for key in records if key[0] in args.task_ids and key[1] in episode_ids}
     overall = write_summary(out, args, requested)["overall"]
     print(f"summary: {overall['episodes']} episodes, success {overall['success_rate']:.3f}, "
           f"bowl-choice accuracy {overall['bowl_choice_accuracy']:.3f} -> {out / SUMMARY_NAME}", flush=True)

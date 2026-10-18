@@ -181,11 +181,25 @@ on bowl 2):
 | 0 | … between the plate and the ramekin … | … next to the ramekin … | 5/5 | **0/5** (all five episodes lift bowl 1) |
 | 1 | … next to the ramekin … | … next to the cookie box … | 5/5 | 3/5 (2 lift bowl 1) |
 
-The VLA's own language channel is weak against its layout preference: in
-layout 0 the bowl-2 sentence does not change the bowl at all, in layout 1 it
-does in 3 of 5 episodes. Counterfactual labels therefore exist only for the
-layouts in which the VLA can be talked into bowl 2; the full collection (10
-tasks × 2 bowls × 20 init states) is run to find out which these are.
+Full collection (10 tasks × 2 bowls × init states 0–19, `data/vla/counterfactual`,
+a query recorded every 2 env steps; success = `On(bowl, plate)` for the
+prompted bowl):
+
+| task | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| bowl-1 prompt (task language) → bowl 1 on plate | 20 | 20 | 19 | 20 | 19 | 17 | 19 | 20 | 20 | 20 |
+| bowl-2 prompt → bowl 2 on plate | **0** | 15 | **0** | 18 | **0** | 20 | 18 | 19 | **1** | 20 |
+| bowl-2 prompt → bowl 1 on plate instead | 20 | 3 | 20 | 2 | 17 | 0 | 1 | 0 | 18 | 0 |
+
+The frozen VLA's own language channel is strong in six layouts (tasks 1, 3,
+5, 6, 7, 9: 75–100 % bowl 2) and absent in four (tasks 0, 2, 4, 8: the
+bowl-2 sentence changes nothing, the VLA places bowl 1). Task 7 — the one
+layout in which the neutral prompt fails — is among those where the language
+decides. Counterfactual labels therefore exist for the six language-sensitive
+layouts (bowl-2 rollouts of the failing layouts are excluded by
+`--successful-only`); the four others remain layout-locked for any method
+that only re-weights what the VLA can already do, and are reported
+separately.
 
 ## Notes
 
