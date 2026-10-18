@@ -31,6 +31,7 @@ def load_runs(out_dir):
         runs.append({"run": path.parent.name, "condition": summary.get("condition"),
                      "modality": summary.get("modality", "none"), "sigma_scale": summary.get("sigma_scale"),
                      "seed": summary.get("seed"), "episodes": overall.get("episodes", 0),
+                     "target_bowl": summary.get("target_bowl", 1), "first_episode": summary.get("first_episode", 0),
                      "success_rate": overall.get("success_rate"),
                      "bowl_choice_accuracy": overall.get("bowl_choice_accuracy"),
                      "bowl_choice_counts": overall.get("bowl_choice_counts", {}),
@@ -40,7 +41,7 @@ def load_runs(out_dir):
                                       "task_language": row.get("task_language")}
                                for task, row in summary.get("tasks", {}).items()},
                      "path": str(path)})
-    runs.sort(key=lambda r: (CONDITION_ORDER.get(r["condition"], 9), MODALITY_ORDER.get(r["modality"], 9),
+    runs.sort(key=lambda r: (r["target_bowl"], CONDITION_ORDER.get(r["condition"], 9), MODALITY_ORDER.get(r["modality"], 9),
                              -(r["sigma_scale"] if r["sigma_scale"] is not None else 0), r["run"]))
     return runs
 
@@ -64,14 +65,15 @@ def load_priors(out_dir):
 
 
 def markdown(runs, priors):
-    lines = ["| run | condition | modality | sigma | episodes | success % | bowl-choice % | target/distractor/none |",
-             "|---|---|---|---|---|---|---|---|"]
+    lines = ["| run | condition | modality | sigma | episodes | success % | bowl-choice % | target/distractor/none | bowl |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for run in runs:
         counts = run["bowl_choice_counts"]
         sigma = "" if run["condition"] != "neutral-prior" or run["sigma_scale"] is None else f"{run['sigma_scale']:g}"
         lines.append(f"| {run['run']} | {run['condition']} | {run['modality']} | {sigma} | {run['episodes']} | "
                      f"{percent(run['success_rate'])} | {percent(run['bowl_choice_accuracy'])} | "
-                     f"{counts.get('target', 0)}/{counts.get('distractor', 0)}/{counts.get('none', 0)} |")
+                     f"{counts.get('target', 0)}/{counts.get('distractor', 0)}/{counts.get('none', 0)} | "
+                     f"{run['target_bowl']} |")
     tasks = sorted({task for run in runs for task in run["tasks"]}, key=int)
     if tasks:
         lines += ["", "| run | " + " | ".join(f"task {t}" for t in tasks) + " |", "|---|" + "---|" * len(tasks)]
@@ -96,12 +98,12 @@ def write_csv(runs, path):
     with Path(path).open("w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["run", "condition", "modality", "sigma_scale", "task_id", "task_language", "episodes",
-                         "success_rate", "bowl_choice_accuracy"])
+                         "success_rate", "bowl_choice_accuracy", "target_bowl", "first_episode"])
         for run in runs:
             for task, row in sorted(run["tasks"].items(), key=lambda item: int(item[0])):
                 writer.writerow([run["run"], run["condition"], run["modality"], run["sigma_scale"], task,
                                  row.get("task_language", ""), row.get("episodes"), row.get("success_rate"),
-                                 row.get("bowl_choice_accuracy")])
+                                 row.get("bowl_choice_accuracy"), run["target_bowl"], run["first_episode"]])
 
 
 def main(argv=None):

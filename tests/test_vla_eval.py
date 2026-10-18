@@ -402,6 +402,41 @@ class CollectResultsTest(unittest.TestCase):
             self.assertTrue(csv_lines[1].startswith("full-prompt-none,full-prompt,none,1.0,0,"))
 
 
+class CounterfactualCampaignScriptTest(unittest.TestCase):
+    SCRIPT = SCRIPTS / "run_vla_counterfactual.sh"
+
+    def test_syntax(self):
+        subprocess.run(["bash", "-n", str(self.SCRIPT)], check=True)
+        self.assertTrue(os.access(self.SCRIPT, os.X_OK))
+
+    def test_dry_run_cells_and_held_out_states(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = dict(os.environ, DRY_RUN="1", LOG_DIR=str(Path(temp) / "logs"), OUT_DIR=str(Path(temp) / "out"),
+                       DATA=str(Path(temp) / "data"), VENV=str(Path(temp) / "no-venv"), TASKS="0-1", EPISODES="2",
+                       MODALITIES="text sketch", EMBED_PYTHON="/opt/py",
+                       CELLS="full-prompt-b2 neutral-prior-concat-sketch-s1-b2 neutral-prior-none-none-s1-b1")
+            result = subprocess.run(["bash", str(self.SCRIPT)], env=env, capture_output=True, text=True, check=True)
+            out = result.stdout
+            data = str(Path(temp) / "data")
+            self.assertIn(f"/opt/py scripts/vla/embed_vla_instructions.py --data {data} "
+                          "--voice data/voices/en_US-lessac-medium.onnx --device cuda --tasks 100-109,200-209 "
+                          "--modalities text sketch --embedder-model google/embeddinggemma-2", out)
+            self.assertIn(f"train_vla_prior.py --data {data} --out {Path(temp) / 'out' / 'prior-cf-concat'} "
+                          "--instr-mode concat --modalities text,sketch", out)
+            self.assertIn("--instr-mode none", out)
+            evals = [line for line in out.splitlines() if "eval_vla_steer.py" in line]
+            self.assertEqual(len(evals), 3)
+            self.assertTrue(all("--first-episode 20" in line for line in evals))
+            self.assertIn("--condition full-prompt --instr-modality none --target-bowl 2", evals[0])
+            self.assertIn("--condition neutral-prior --instr-modality sketch --target-bowl 2", evals[1])
+            self.assertIn(f"--prior {Path(temp) / 'out' / 'prior-cf-concat' / 'best.pt'} --sigma-scale 1", evals[1])
+            self.assertIn("--embedder-python /opt/py", evals[1])
+            self.assertIn("--condition neutral-prior --instr-modality none --target-bowl 1", evals[2])
+            self.assertIn("prior-cf-none/best.pt", evals[2])
+            self.assertNotIn("neutral-gauss", out.split("=== eval")[1] if "=== eval" in out else "")
+            self.assertIn("campaign finished", out)
+
+
 class CampaignScriptTest(unittest.TestCase):
     SCRIPT = SCRIPTS / "run_vla_campaign.sh"
 
