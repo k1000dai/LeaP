@@ -199,7 +199,15 @@ decides. Counterfactual labels therefore exist for the six language-sensitive
 layouts (bowl-2 rollouts of the failing layouts are excluded by
 `--successful-only`); the four others remain layout-locked for any method
 that only re-weights what the VLA can already do, and are reported
-separately.
+separately. Three alternative phrasings for bowl 2 of task 0 ("next to the
+ramekin, not the one between the plate and the ramekin", "closest to the
+ramekin", "farthest from the plate"; 5 episodes each) also give 0/5: the lock
+is not a matter of wording.
+
+Reversal of the rollouts under the neutral prompt (`scripts/vla/reverse_rollouts.py`,
+successful episodes only, every recorded query): on the pilot the
+reconstruction error of the VLA's own chunks is 0.13–0.21 (mean per (task,
+bowl); demonstration chunks: 0.275), recovered-noise std 1.2–1.6.
 
 ## Notes
 
