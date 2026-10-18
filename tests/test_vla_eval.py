@@ -413,7 +413,7 @@ class CounterfactualCampaignScriptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             env = dict(os.environ, DRY_RUN="1", LOG_DIR=str(Path(temp) / "logs"), OUT_DIR=str(Path(temp) / "out"),
                        DATA=str(Path(temp) / "data"), VENV=str(Path(temp) / "no-venv"), TASKS="0-1", EPISODES="2",
-                       MODALITIES="text sketch", EMBED_PYTHON="/opt/py",
+                       MODALITIES="text sketch", EMBED_PYTHON="/opt/py", DATA_TASKS="100-109,200-209",
                        CELLS="full-prompt-b2 neutral-prior-concat-sketch-s1-b2 neutral-prior-none-none-s1-b1")
             result = subprocess.run(["bash", str(self.SCRIPT)], env=env, capture_output=True, text=True, check=True)
             out = result.stdout
@@ -435,6 +435,17 @@ class CounterfactualCampaignScriptTest(unittest.TestCase):
             self.assertIn("prior-cf-none/best.pt", evals[2])
             self.assertNotIn("neutral-gauss", out.split("=== eval")[1] if "=== eval" in out else "")
             self.assertIn("campaign finished", out)
+
+    def test_default_data_tasks_are_the_files_present(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp) / "data"
+            data.mkdir()
+            for index in list(range(100, 110)) + [201, 205]:
+                (data / f"task_{index}.npz").write_bytes(b"")
+            env = dict(os.environ, DRY_RUN="1", LOG_DIR=str(Path(temp) / "logs"), OUT_DIR=str(Path(temp) / "out"),
+                       DATA=str(data), VENV=str(Path(temp) / "no-venv"), STAGES="embed", EMBED_PYTHON="/opt/py")
+            out = subprocess.run(["bash", str(self.SCRIPT)], env=env, capture_output=True, text=True, check=True).stdout
+            self.assertIn("--tasks 100-109,201,205 ", out)
 
 
 class CampaignScriptTest(unittest.TestCase):

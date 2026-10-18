@@ -5,7 +5,8 @@
 # FIRST_EPISODE.. (default 20..39), held out from the rollouts (states 0..19).
 # Usage: scripts/vla/run_vla_counterfactual.sh
 # Env:   ROOT, VENV (.venv-vla), GPU (0), EPISODES (20), FIRST_EPISODE (20), TASKS (0-9), SEED (0), SUITE, CHECKPOINT,
-#        DATA (data/vla/libero_spatial_counterfactual), DATA_TASKS ("100-109,200-209": the npz indices of the dataset),
+#        DATA (data/vla/libero_spatial_counterfactual), DATA_TASKS (npz indices of the dataset; default: the bowl-1 files
+#        100-109 plus every bowl-2 file present — layouts without a successful bowl-2 rollout have none),
 #        OUT_DIR (outputs/vla_cf), LOG_DIR (logs/vla_cf), NUM_STEPS (10), N_ACTION_STEPS (10), STEPS (12500), BATCH (256),
 #        LR (1e-4), MODALITIES ("text sketch audio"), SIGMAS ("1"), PRIOR_MODES ("concat none"), PRIOR_CKPT (best.pt),
 #        BOWLS ("2 1"), CELLS (names to evaluate; default: all), VOICE, EMBEDDER, EMBED_PYTHON (as in run_vla_campaign.sh),
@@ -16,7 +17,7 @@ set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 VENV="${VENV:-$ROOT/.venv-vla}"; GPU="${GPU:-0}"; EPISODES="${EPISODES:-20}"; FIRST_EPISODE="${FIRST_EPISODE:-20}"
 TASKS="${TASKS:-0-9}"; SEED="${SEED:-0}"; SUITE="${SUITE:-libero_spatial}"; CHECKPOINT="${CHECKPOINT:-lerobot/pi05_libero_finetuned_v044}"
-DATA="${DATA:-data/vla/libero_spatial_counterfactual}"; DATA_TASKS="${DATA_TASKS:-100-109,200-209}"
+DATA="${DATA:-data/vla/libero_spatial_counterfactual}"; DATA_TASKS="${DATA_TASKS:-}"
 OUT_DIR="${OUT_DIR:-outputs/vla_cf}"; LOG_DIR="${LOG_DIR:-logs/vla_cf}"
 NUM_STEPS="${NUM_STEPS:-10}"; N_ACTION_STEPS="${N_ACTION_STEPS:-10}"; STEPS="${STEPS:-12500}"; BATCH="${BATCH:-256}"; LR="${LR:-1e-4}"
 MODALITIES="${MODALITIES:-text sketch audio}"; SIGMAS="${SIGMAS:-1}"; PRIOR_MODES="${PRIOR_MODES:-concat none}"
@@ -50,6 +51,10 @@ expand_tasks() {
   echo "${out[@]}"
 }
 TASK_LIST="$(expand_tasks "$TASKS")"; N_TASKS=$(wc -w <<< "$TASK_LIST")
+if [[ -z "$DATA_TASKS" ]]; then
+  DATA_TASKS="100-109"
+  for f in "$DATA"/task_2[0-9][0-9].npz; do [[ -f "$f" ]] && DATA_TASKS+=",$(basename "$f" .npz | cut -d_ -f2)"; done
+fi
 DATA_TASK_LIST="$(expand_tasks "$DATA_TASKS")"
 MODALITY_CSV="$(echo "$MODALITIES" | tr ' ' ',')"
 
