@@ -1,7 +1,6 @@
 # Steering a frozen VLA through a learned flow-matching prior (phase 3)
 
-Status: phase 3 evaluated (2026-10-18); phase 3b (counterfactual bowl-2 data)
-in progress on robot_dev6. Design:
+Status: phases 3 and 3b evaluated (2026-10-18). Design:
 `docs/superpowers/specs/2026-10-17-vla-prior-steering-design.md`.
 
 ## Idea
@@ -161,7 +160,7 @@ after ~500 steps (the campaign uses `best.pt`); the steering embedding adds
 within a layout the instruction is constant and redundant with the
 observation. The counterfactual extension below addresses this.
 
-## Counterfactual bowl-2 data (phase 3b, in progress)
+## Counterfactual bowl-2 data (phase 3b)
 
 The frozen VLA is prompted, per layout, with the spatial phrase of bowl 2
 (derived from the BDDL init regions; every bowl-2 phrase is the bowl-1 phrase
@@ -241,12 +240,92 @@ Unlike the demonstration-trained prior, this one encodes the bowl: swapping
 the instruction raises the held-out NLL by 0.1–0.7 nats, the own instruction
 wins on 77–100 % of rows, and μ moves by 0.3–0.5 σ. Whether a shift of that
 size survives the VLA's contractive flow at inference is what the evaluation
-measures (held-out init states 20–39; results below when the campaign
-finishes).
+measures (held-out init states 20–39; results below).
 
 ### Results (phase 3b)
 
-(pending — `scripts/vla/collect_vla_results.py --out-dir outputs/vla_cf`)
+10 tasks × 20 held-out init states (20–39; the counterfactual rollouts used
+0–19) per cell, neutral prompt unless noted, σ-scale 1, 10 Euler steps as
+before; x0 from `prior-cf-concat` for the instructed cells and from
+`prior-cf-none` for "no instruction". Success = `On(bowl, plate)` for the
+instructed bowl; bowl choice = the bowl lifted first (instructed / other /
+none). `scripts/vla/collect_vla_results.py --out-dir outputs/vla_cf`.
+
+Instructing bowl 2 (against the layout preference):
+
+| condition | bowl-2 success | bowl-2 choice (bowl 2 / bowl 1 / none) |
+|---|---|---|
+| full-prompt: bowl-2 sentence in the VLA's prompt, Gaussian x0 (ceiling) | 56.5 % | 57.0 % (114/80/6) |
+| neutral-gauss: no instruction anywhere (floor) | 11.0 % | 11.0 % (22/170/8) |
+| neutral-prior, no instruction | 14.0 % | 14.0 % (28/166/6) |
+| neutral-prior + text "bowl 2" | 21.5 % | 22.0 % (44/154/2) |
+| neutral-prior + sketch "bowl 2" | 19.5 % | 20.5 % (41/156/3) |
+| neutral-prior + audio "bowl 2" | 21.5 % | 21.0 % (42/154/4) |
+
+Instructing bowl 1 (with the layout preference; the two uninstructed rows
+are the same 200 rollouts as above, relabelled):
+
+| condition | bowl-1 success | bowl-1 choice (bowl 1 / bowl 2 / none) |
+|---|---|---|
+| neutral-gauss | 80.0 % | 85.0 % (170/22/8) |
+| neutral-prior, no instruction | 82.0 % | 83.0 % (166/28/6) |
+| neutral-prior + text "bowl 1" | 87.5 % | 89.5 % (179/17/4) |
+| neutral-prior + sketch "bowl 1" | 86.0 % | 90.0 % (180/19/1) |
+| neutral-prior + audio "bowl 1" | 88.5 % | 89.5 % (179/17/4) |
+
+Bowl-2 success per task under the bowl-2 instruction (20 episodes each; the
+language-sensitive layouts are 1, 3, 5, 6, 7, 9):
+
+| condition | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| full-prompt | 0 | 100 | 5 | 65 | 0 | 100 | 95 | 100 | 10 | 90 |
+| neutral-gauss | 0 | 25 | 0 | 0 | 0 | 10 | 0 | 70 | 0 | 5 |
+| neutral-prior, no instruction | 0 | 30 | 0 | 15 | 0 | 25 | 0 | 55 | 0 | 15 |
+| neutral-prior + text | 0 | 40 | 0 | 15 | 0 | 45 | 0 | 90 | 0 | 25 |
+| neutral-prior + sketch | 0 | 40 | 0 | 15 | 0 | 45 | 0 | 80 | 0 | 15 |
+| neutral-prior + audio | 0 | 35 | 0 | 15 | 0 | 55 | 0 | 90 | 0 | 20 |
+
+Reading:
+
+- **The prior steers the frozen VLA, in both directions.** The same prior
+  weights, the same neutral prompt and the same 200 init states give bowl 2
+  on 8.5 / 9.5 / 8.5 % of the episodes with the bowl-1 instruction (text /
+  sketch / audio) and on 22.0 / 20.5 / 21.0 % with the bowl-2 instruction
+  (two-proportion z = 3.8 / 3.1 / 3.5, p ≤ 0.002 each). Against the
+  uninstructed prior (14.0 %) the bowl-2 instruction adds 6.5–8 points
+  (pooled over the modalities 21.2 vs 14.0 %, z = 2.2, p = 0.03) and the
+  bowl-1 instruction adds 6.5–7 points of bowl-1 choice (83.0 → 89.5–90 %,
+  pooled z = 2.5, p = 0.01). The three modalities are indistinguishable, as
+  in the offline probe.
+- **It is a fraction of the VLA's own language channel.** The bowl-2
+  sentence in the prompt reaches 57 % bowl 2 (+46 points over the floor); the
+  source prior reaches 21–22 % (+10–11). The μ shift of 0.3–0.5 σ measured
+  offline survives the contractive x0 → action map of π0.5 only in part.
+- **It works where the VLA can already be talked into bowl 2.** The gain
+  concentrates in tasks 1, 5, 7 and 9 (floor 25 / 10 / 70 / 5 % → 35–40 /
+  45–55 / 80–90 / 15–25 %); task 3 sits at 15 % for every prior cell,
+  instructed or not (full prompt 65 %), task 6 at 0 % (full prompt 95 %),
+  and the four layout-locked tasks 0, 2, 4, 8 stay at 0 % for every method
+  including the full prompt. Task 7 is the clearest two-way case: under the
+  neutral prompt the VLA prefers bowl 2 in that layout (70 % bowl 2, 15 %
+  bowl 1), and the prior moves it to 80–90 % bowl 2 or 35–40 % bowl 1 as
+  instructed.
+- **No regression on the preferred bowl.** With the bowl-1 instruction the
+  counterfactual prior beats Gaussian x0 on bowl-1 success (80 → 86–88.5 %),
+  through tasks 5, 7 and 9; the uninstructed counterfactual prior gives 82 %.
+  (Other init states than the phase-3 table, so not comparable to it episode
+  by episode.)
+
+Conclusion of phase 3: a forward model of the source noise can steer a frozen
+VLA's discrete choice through x0 alone, but only (i) once its labels carry
+the counterfactual, which the demonstrations do not, (ii) among behaviours
+the VLA already produces under the neutral prompt, and (iii) with roughly a
+quarter of the effect of the VLA's own language input. Follow-ups, in order
+of expected information: amplify the instruction's shift of μ at inference
+(x0 = μ_none + λ(μ_instr − μ_none), λ > 1, the prior's analogue of guidance);
+more init states per task (20 per task gives ±10 points per cell); a prior
+over several chunks or over the VLA's prefix KV instead of x0 for the
+layouts where x0 does not reach (3, 6).
 
 ## Notes
 
@@ -256,3 +335,7 @@ finishes).
   `LIBERO_CONFIG_PATH=data/vla/libero_config`.
 - Steering here selects among discrete behaviours (which bowl). Continuous
   steering is out of scope for this phase.
+- Timing (A6000): a 200-episode evaluation cell takes 47–56 min; the two
+  counterfactual priors train in a few minutes; the phase-3b campaign ran
+  11:49–15:33 on three GPUs (`scripts/vla/run_vla_counterfactual.sh`, one
+  instance per GPU, cells filtered with `CELLS`).
